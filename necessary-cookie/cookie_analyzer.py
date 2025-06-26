@@ -15,6 +15,7 @@ import os
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from urllib.parse import unquote
+from curl_reader import CurlFileReader
 
 class CookieAnalyzer:
     def __init__(self, expected_key: str = "status", delay: float = 0.5, retry_count: int = 3):
@@ -244,7 +245,7 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python cookie_analyzer.py                           # 使用默认配置
+  python cookie_analyzer.py                           # 使用默认配置 (读取 .data/curl.txt, 输出到 .data/)
   python cookie_analyzer.py --delay 2.0               # 设置请求间隔为2秒
   python cookie_analyzer.py --retry 5                 # 设置重试次数为5次
   python cookie_analyzer.py --file my_curls.txt       # 使用自定义curl文件
@@ -269,15 +270,15 @@ def parse_arguments():
     parser.add_argument(
         "--file", "-f",
         type=str,
-        default="curl.txt",
-        help="curl命令文件路径，默认curl.txt"
+        default=".data/curl.txt",
+        help="curl命令文件路径，默认.data/curl.txt"
     )
     
     parser.add_argument(
         "--output-dir", "-o",
         type=str,
-        default="result",
-        help="结果输出目录，默认result"
+        default=".data",
+        help="结果输出目录，默认.data"
     )
     
     parser.add_argument(
@@ -298,7 +299,7 @@ def ensure_output_dir(output_dir: str) -> str:
     return timestamp
 
 def main():
-    """主函数，从curl.txt文件读取命令并进行分析"""
+    """主函数，从指定的curl文件读取命令并进行分析"""
     args = parse_arguments()
     
     # 确保输出目录存在并获取时间戳前缀
@@ -313,10 +314,6 @@ def main():
         print("-" * 60)
     
     try:
-        # 动态导入以支持自定义文件路径
-        sys.path.insert(0, os.path.dirname(os.path.abspath(args.file)))
-        from curl_reader import CurlFileReader
-        
         # 读取curl命令
         reader = CurlFileReader(args.file)
         commands = reader.read_all_commands()

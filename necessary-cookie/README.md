@@ -8,12 +8,12 @@
 # 安装依赖
 pip install -r requirements.txt
 
-# 编辑curl.txt添加你的curl命令
+# 编辑 .data/curl.txt 添加你的curl命令
 # 运行分析
 python cookie_analyzer.py
 
-# 查看结果（在result目录中）
-ls result/
+# 查看结果（在 .data 目录中）
+ls .data/
 ```
 
 ## ✨ 功能特性
@@ -34,8 +34,8 @@ python cookie_analyzer.py [选项]
 选项:
   -d, --delay FLOAT      请求间隔时间（秒），默认1.0秒
   -r, --retry INT        网络异常重试次数，默认3次
-  -f, --file PATH        curl命令文件路径，默认curl.txt
-  -o, --output-dir DIR   结果输出目录，默认result
+  -f, --file PATH        curl命令文件路径，默认.data/curl.txt
+  -o, --output-dir DIR   结果输出目录，默认.data
   -q, --quiet           静默模式，减少输出信息
   -h, --help            显示帮助信息
 ```
@@ -43,7 +43,7 @@ python cookie_analyzer.py [选项]
 ### 使用示例
 
 ```bash
-# 使用默认配置
+# 使用默认配置 (读取 .data/curl.txt, 输出到 .data/)
 python cookie_analyzer.py
 
 # 设置请求间隔为2秒
@@ -65,9 +65,9 @@ python cookie_analyzer.py --quiet
 python cookie_analyzer.py -d 1.5 -r 5 -f prod_curls.txt -o prod_results
 ```
 
-## 📄 curl.txt文件格式
+## 📄 .data/curl.txt文件格式
 
-在 `curl.txt` 文件中按以下格式添加curl命令：
+在 `.data/curl.txt` 文件中按以下格式添加curl命令：
 
 ```
 [CURL_START]
@@ -97,7 +97,7 @@ curl 'https://httpbin.org/cookies' \
 分析完成后会在指定目录生成以下文件（文件名以时间戳开头）：
 
 ```
-result/
+.data/
 ├── 250125.143022-ESI网站分析_minimal_curl.sh      # 最小化curl命令
 ├── 250125.143022-ESI网站分析_analysis_result.json # 详细分析结果
 ├── 250125.150430-测试API_minimal_curl.sh
@@ -162,8 +162,8 @@ curl 'https://example.com/api' \
 已移除cookie数量: 34
 
 ✅ 结果已保存:
-  📝 result/250125.143022-ESI网站分析_minimal_curl.sh
-  📊 result/250125.143022-ESI网站分析_analysis_result.json
+  📝 .data/250125.143022-ESI网站分析_minimal_curl.sh
+  📊 .data/250125.143022-ESI网站分析_analysis_result.json
 ```
 
 ## 🔧 编程接口
@@ -173,7 +173,7 @@ from cookie_analyzer import CookieAnalyzer
 from curl_reader import CurlFileReader
 
 # 从文件读取
-reader = CurlFileReader("curl.txt")
+reader = CurlFileReader(".data/curl.txt")
 commands = reader.read_all_commands()
 selected_cmd = commands[0]
 
@@ -207,13 +207,10 @@ necessary-cookie/
 ├── cookie_analyzer.py      # 核心分析引擎（主程序）
 ├── curl_reader.py         # curl文件读取模块
 ├── test_cookie_analyzer.py # 测试套件
-├── curl.txt               # curl命令配置文件
 ├── requirements.txt       # 依赖列表
 ├── README.md             # 项目说明文档
-└── result/               # 结果输出目录
+└── .data/                  # 数据和结果目录
+    ├── curl.txt            # 默认curl命令配置文件
     ├── YYMMDD.hhmmss-*_minimal_curl.sh
     └── YYMMDD.hhmmss-*_analysis_result.json
 ```
-
-
-  
