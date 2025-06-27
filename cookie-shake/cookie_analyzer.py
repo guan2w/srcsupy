@@ -92,7 +92,7 @@ class CookieAnalyzer:
         ]
         return any(error in error_message for error in network_errors)
     
-    def test_request(self, url: str, headers: Dict[str, str], cookies: Dict[str, str], return_data: bool = False) -> Tuple[bool, Optional[Dict]]:
+    def test_request(self, url: str, headers: Dict[str, str], cookies: Dict[str, str], return_data: bool = False) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """
         测试请求是否成功，支持网络异常重试
         
@@ -103,8 +103,8 @@ class CookieAnalyzer:
             return_data: 是否返回响应数据
             
         Returns:
-            如果return_data为True，返回(是否成功, 响应数据)
-            如果return_data为False，返回(是否成功, None)
+            如果return_data为True，返回(是否成功, 响应数据, 失败原因)
+            如果return_data为False，返回(是否成功, None, 失败原因)
         """
         last_exception = None
         
@@ -114,18 +114,24 @@ class CookieAnalyzer:
                 
                 # 检查状态码
                 if response.status_code != 200:
-                    return False, None
+                    reason = f"HTTP状态码错误: {response.status_code}"
+                    return False, None, reason
                     
                 # 检查响应内容是否为JSON且包含期望的键
                 try:
                     json_data = response.json()
                     success = self.expected_key in json_data
-                    if return_data and success:
-                        return success, json_data
+                    if success:
+                        if return_data:
+                            return success, json_data, None
+                        else:
+                            return success, None, None
                     else:
-                        return success, None
-                except (json.JSONDecodeError, KeyError):
-                    return False, None
+                        reason = f"响应JSON中缺少期望的键: '{self.expected_key}'"
+                        return False, None, reason
+                except json.JSONDecodeError:
+                    reason = "响应内容不是有效的JSON格式"
+                    return False, None, reason
                     
             except Exception as e:
                 last_exception = e
@@ -139,12 +145,14 @@ class CookieAnalyzer:
                 else:
                     # 非网络异常或已达到最大重试次数
                     if self._is_network_error(e):
-                        print(f"    ❌ 网络异常 (已重试{self.retry_count}次): {e}")
+                        reason = f"网络异常 (已重试{self.retry_count}次): {e}"
+                        print(f"    ❌ {reason}")
                     else:
-                        print(f"    ❌ 请求异常: {e}")
-                    return False, None
+                        reason = f"请求异常: {e}"
+                        print(f"    ❌ {reason}")
+                    return False, None, reason
         
-        return False, None
+        return False, None, "未知错误"
     
     def find_necessary_cookies(self, url: str, headers: Dict[str, str], cookies: Dict[str, str]) -> Dict[str, str]:
         """
@@ -164,8 +172,10 @@ class CookieAnalyzer:
         
         # 首先测试完整的cookie是否工作
         print("测试完整cookie...")
-        if not self.test_request(url, headers, cookies)[0]:
-            print("❌ 完整cookie请求失败！请检查curl命令是否正确")
+        success, _, reason = self.test_request(url, headers, cookies)
+        if not success:
+            print(f"❌ 完整cookie请求失败！请检查curl命令是否正确")
+            print(f"    💡 失败原因: {reason}")
             return {}
         print("✅ 完整cookie请求成功")
         
@@ -183,7 +193,7 @@ class CookieAnalyzer:
                 
                 # 测试移除后是否仍然成功
                 time.sleep(self.delay)  # 避免请求过于频繁
-                success, data = self.test_request(url, headers, temp_cookies, True)
+                success, data, reason = self.test_request(url, headers, temp_cookies, True)
                 if success:
                     print(f"  ✅ 可以移除 '{cookie_name}'")
                     necessary_cookies = temp_cookies
@@ -194,6 +204,7 @@ class CookieAnalyzer:
                         print(f"    📄 {self.expected_key}: {key_value[:100]}{'...' if len(key_value) > 100 else ''}")
                 else:
                     print(f"  ❌ 不能移除 '{cookie_name}' - 这是必要的cookie")
+                    print(f"    🔍 判断依据: {reason}")
         
         print(f"\n" + "="*60)
         print(f"分析完成！")

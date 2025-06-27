@@ -28,6 +28,7 @@ Thumbs.db
 # IDE 配置
 .vscode/
 .idea/
+.cursor/
 
 # 日志、配置、excel 等
 .env
@@ -38,13 +39,6 @@ Thumbs.db
 *.zip
 *.tar.gz
 
-# 采集结果
+# 数据文件
 scraped-*/**
-
-# CURSOR
-.cursor/
-.cursorrules
-.cursorignore
-
-# Input/Output files
 .data/
