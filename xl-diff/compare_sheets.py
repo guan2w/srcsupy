@@ -26,7 +26,7 @@ class ExcelComparator:
     def __init__(self, file1_path, file2_path, key_columns, 
                  sheet1_name=None, sheet2_name=None, 
                  output_path="comparison_report.xlsx", 
-                 engine="auto"):
+                 engine="auto", header1=1, header2=1):
         """
         初始化比较器
         
@@ -38,6 +38,8 @@ class ExcelComparator:
             sheet2_name (str, optional): 第二个文件的Sheet名
             output_path (str): 输出报告文件路径
             engine (str): pandas读取引擎
+            header1 (int): 文件1的表头行号 (从1开始)
+            header2 (int): 文件2的表头行号 (从1开始)
         """
         self.file1_path = Path(file1_path)
         self.file2_path = Path(file2_path)
@@ -46,6 +48,8 @@ class ExcelComparator:
         self.sheet2_name = sheet2_name
         self.output_path = Path(output_path)
         self.engine = engine
+        self.header1 = header1
+        self.header2 = header2
         
         # 比较结果存储
         self.df1 = None
@@ -70,25 +74,27 @@ class ExcelComparator:
             except ImportError:
                 return None
     
-    def _read_excel_file(self, file_path, sheet_name):
+    def _read_excel_file(self, file_path, sheet_name, header_row):
         """读取Excel文件"""
         engine = self._determine_engine()
+        # pandas的header是0-indexed, 用户输入是1-indexed
+        header_index = header_row - 1
         
         try:
             if sheet_name:
-                df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine)
+                df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine, header=header_index)
             else:
                 # 如果没有指定sheet名，读取第一个sheet
-                df = pd.read_excel(file_path, engine=engine)
+                df = pd.read_excel(file_path, engine=engine, header=header_index)
             
-            print(f"✓ 成功读取文件: {file_path}")
+            print(f"[OK] 成功读取文件: {file_path} (表头在第 {header_row} 行)")
             print(f"  - 数据行数: {len(df)}")
             print(f"  - 数据列数: {len(df.columns)}")
             
             return df
             
         except Exception as e:
-            print(f"✗ 读取文件失败: {file_path}")
+            print(f"[FAIL] 读取文件失败: {file_path}")
             print(f"  错误信息: {str(e)}")
             raise
     
@@ -110,9 +116,22 @@ class ExcelComparator:
         self.df1.dropna(subset=self.key_columns, how='all', inplace=True)
         self.df2.dropna(subset=self.key_columns, how='all', inplace=True)
         
+        # 验证唯一键的唯一性
+        duplicates_1 = self.df1[self.df1.duplicated(subset=self.key_columns, keep=False)]
+        if not duplicates_1.empty:
+            raise ValueError(f"文件1中指定的唯一键组合存在重复项。例如: \n{duplicates_1[self.key_columns].head()}")
+
+        duplicates_2 = self.df2[self.df2.duplicated(subset=self.key_columns, keep=False)]
+        if not duplicates_2.empty:
+            raise ValueError(f"文件2中指定的唯一键组合存在重复项。例如: \n{duplicates_2[self.key_columns].head()}")
+        
         # 设置唯一键为索引
         self.df1.set_index(self.key_columns, inplace=True)
         self.df2.set_index(self.key_columns, inplace=True)
+        
+        # 对多重索引进行排序，提高性能并避免后续查找错误
+        self.df1.sort_index(inplace=True)
+        self.df2.sort_index(inplace=True)
         
         print(f"  - 文件1有效数据行数: {len(self.df1)}")
         print(f"  - 文件2有效数据行数: {len(self.df2)}")
@@ -145,6 +164,10 @@ class ExcelComparator:
         
         df1_common = self.df1.loc[common_keys, common_columns].copy()
         df2_common = self.df2.loc[common_keys, common_columns].copy()
+        
+        # 重新排序索引，因为intersection操作不保证顺序
+        df1_common.sort_index(inplace=True)
+        df2_common.sort_index(inplace=True)
         
         # 转换为字符串进行精确比较，避免数据类型差异导致的误判
         df1_str = df1_common.astype(str).replace('nan', '')
@@ -238,13 +261,13 @@ class ExcelComparator:
         try:
             # 1. 读取文件
             print("\n1. 读取Excel文件...")
-            self.df1 = self._read_excel_file(self.file1_path, self.sheet1_name)
-            self.df2 = self._read_excel_file(self.file2_path, self.sheet2_name)
-            
+            self.df1 = self._read_excel_file(self.file1_path, self.sheet1_name, self.header1)
+            self.df2 = self._read_excel_file(self.file2_path, self.sheet2_name, self.header2)
+
             # 2. 验证唯一键
             print("\n2. 验证唯一键...")
             self._validate_key_columns()
-            print(f"✓ 唯一键验证通过: {self.key_columns}")
+            print(f"[OK] 唯一键验证通过: {self.key_columns}")
             
             # 3. 数据预处理
             print("\n3. 数据预处理...")
@@ -262,7 +285,7 @@ class ExcelComparator:
             return True
             
         except Exception as e:
-            print(f"\n✗ 比较过程中发生错误: {str(e)}")
+            print(f"[FAIL] 比较过程中发生错误: {str(e)}")
             return False
     
     def _generate_report(self):
@@ -274,7 +297,7 @@ class ExcelComparator:
         )
         
         if not has_differences:
-            print("\n🎉 恭喜！两个文件的数据完全一致，无需生成差异报告。")
+            print("\n[DONE] 恭喜！两个文件的数据完全一致，无需生成差异报告。")
             return
         
         try:
@@ -338,13 +361,13 @@ class ExcelComparator:
                         worksheet.write(0, col_num, value, header_format)
                         worksheet.set_column(col_num, col_num, 15)
             
-            print(f"✓ 差异报告已生成: {self.output_path}")
+            print(f"[OK] 差异报告已生成: {self.output_path}")
             print(f"  - 新增行数: {len(self.added_df)}")
             print(f"  - 删除行数: {len(self.deleted_df)}")
             print(f"  - 修改行数: {len(self.modified_df.groupby(self.key_columns)) if not self.modified_df.empty else 0}")
             
         except Exception as e:
-            print(f"✗ 生成报告时发生错误: {str(e)}")
+            print(f"[FAIL] 生成报告时发生错误: {str(e)}")
             raise
 
 
@@ -377,7 +400,7 @@ def create_sample_files():
     with pd.ExcelWriter('sample_v2.xlsx', engine='xlsxwriter') as writer:
         pd.DataFrame(data2).to_excel(writer, sheet_name='员工数据', index=False)
     
-    print("✓ 示例文件创建完成:")
+    print("[OK] 示例文件创建完成:")
     print("  - sample_v1.xlsx")
     print("  - sample_v2.xlsx")
 
@@ -391,6 +414,7 @@ def main():
 使用示例:
   %(prog)s file1.xlsx file2.xlsx -k "员工ID"
   %(prog)s v1.xlsx v2.xlsx -k "姓名" "部门" -s1 "Sheet1" -s2 "数据" -o "报告.xlsx"
+  %(prog)s file1.xlsx file2.xlsx -k "ID" --header1 3 --header2 5
   %(prog)s --demo  # 创建示例文件并运行演示
         """
     )
@@ -408,6 +432,10 @@ def main():
                        help='文件1的工作表名称 (默认为第一个Sheet)')
     parser.add_argument('-s2', '--sheet2', 
                        help='文件2的工作表名称 (默认为第一个Sheet)')
+    parser.add_argument('--header1', type=int, default=1,
+                       help='文件1的表头行号 (默认为1)')
+    parser.add_argument('--header2', type=int, default=1,
+                       help='文件2的表头行号 (默认为1)')
     parser.add_argument('-o', '--output', default='comparison_report.xlsx',
                        help='差异报告输出路径 (默认: comparison_report.xlsx)')
     parser.add_argument('--engine', choices=['auto', 'calamine', 'openpyxl'], 
@@ -437,7 +465,7 @@ def main():
         
         success = comparator.compare()
         if success:
-            print(f"\n🎉 演示完成！请查看生成的报告文件: demo_report.xlsx")
+            print("\n[DONE] 演示完成！请查看生成的报告文件: demo_report.xlsx")
         return
     
     # 正常模式 - 验证参数
@@ -450,7 +478,7 @@ def main():
     # 检查文件是否存在
     for file_path in [args.file1, args.file2]:
         if not Path(file_path).exists():
-            print(f"✗ 文件不存在: {file_path}")
+            print(f"[FAIL] 文件不存在: {file_path}")
             sys.exit(1)
     
     # 执行比较
@@ -461,15 +489,17 @@ def main():
         sheet1_name=args.sheet1,
         sheet2_name=args.sheet2,
         output_path=args.output,
-        engine=args.engine
+        engine=args.engine,
+        header1=args.header1,
+        header2=args.header2
     )
     
     success = comparator.compare()
     
     if success:
-        print(f"\n🎉 比较完成！")
+        print("\n[DONE] 比较完成！")
     else:
-        print(f"\n❌ 比较失败，请检查错误信息。")
+        print("\n[ERROR] 比较失败，请检查错误信息。")
         sys.exit(1)
 
 
