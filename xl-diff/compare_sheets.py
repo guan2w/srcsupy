@@ -26,7 +26,7 @@ class ExcelComparator:
     def __init__(self, file1_path, file2_path, key_columns, 
                  sheet1_name=None, sheet2_name=None, 
                  output_path="comparison_report.xlsx", 
-                 engine="auto", header1=1, header2=1):
+                 engine="auto", header1=1, header2=1, ignore_columns=None):
         """
         初始化比较器
         
@@ -50,6 +50,7 @@ class ExcelComparator:
         self.engine = engine
         self.header1 = header1
         self.header2 = header2
+        self.ignore_columns = ignore_columns if ignore_columns is not None else []
         
         # 比较结果存储
         self.df1 = None
@@ -156,6 +157,9 @@ class ExcelComparator:
         # 找到共同的行和列
         common_keys = self.df1.index.intersection(self.df2.index)
         common_columns = self.df1.columns.intersection(self.df2.columns).tolist()
+        
+        # 排除忽略的列
+        common_columns = [col for col in common_columns if col not in self.ignore_columns]
         
         if common_keys.empty or not common_columns:
             self.modified_df = pd.DataFrame()
@@ -440,6 +444,8 @@ def main():
                        help='差异报告输出路径 (默认: comparison_report.xlsx)')
     parser.add_argument('--engine', choices=['auto', 'calamine', 'openpyxl'], 
                        default='auto', help='读取Excel的引擎 (默认: auto)')
+    parser.add_argument('-i', '--ignore-columns', nargs='+', default=[],
+                       help='一个或多个在比较时忽略的列名 (表头)')
     
     # 演示模式
     parser.add_argument('--demo', action='store_true',
@@ -460,7 +466,8 @@ def main():
             key_columns=['员工ID'],
             sheet1_name='员工数据',
             sheet2_name='员工数据',
-            output_path='demo_report.xlsx'
+            output_path='demo_report.xlsx',
+            ignore_columns=['入职日期'] # 示例：在演示模式下忽略入职日期列
         )
         
         success = comparator.compare()
@@ -491,7 +498,8 @@ def main():
         output_path=args.output,
         engine=args.engine,
         header1=args.header1,
-        header2=args.header2
+        header2=args.header2,
+        ignore_columns=args.ignore_columns
     )
     
     success = comparator.compare()
