@@ -1,0 +1,59 @@
+{
+  "host_institutions": [
+    {
+      "name": "EAACI and John Wiley and Sons A/S",
+      "type": "copyright",
+      "source_sentence": "© EAACI and John Wiley and Sons A/S. Published by John Wiley and Sons, Ltd",
+      "matched_keyword": "published by",
+      "char_position": {
+        "start": 1481,
+        "end": 1514
+      },
+      "extraction_method": "langextract"
+    },
+    {
+      "name": "John Wiley and Sons, Ltd",
+      "type": "publisher",
+      "source_sentence": "© EAACI and John Wiley and Sons A/S. Published by John Wiley and Sons, Ltd",
+      "matched_keyword": "published by",
+      "char_position": {
+        "start": 1529,
+        "end": 1553
+      },
+      "extraction_method": "langextract"
+    },
+    {
+      "name": "European Academy of Allergy and Clinical Immunology (EAACI)",
+      "type": "host",
+      "source_sentence": "Allergy , the official journal of the European Academy of Allergy and Clinical Immunology (EAACI), aims to advance, impact and communicate all aspects of the discipline of Allergy/Immunology, including educational, basic, translational and clinical research, and to maintain contact between basic and clinical Allergy/Immunology.",
+      "matched_keyword": "official journal of",
+      "char_position": {
+        "start": 4875,
+        "end": 4933
+      },
+      "extraction_method": "langextract"
+    },
+    {
+      "name": "European Academy of Allergy and Clinical Immunology (EAACI)",
+      "type": "host",
+      "source_sentence": "Official journal of the European Academy of Allergy and Clinical Immunology (EAACI)",
+      "matched_keyword": "official journal of",
+      "char_position": {
+        "start": 64445,
+        "end": 64504
+      },
+      "extraction_method": "langextract"
+    },
+    {
+      "name": "John Wiley & Sons, Inc",
+      "type": "copyright",
+      "source_sentence": "Copyright © 1999-2025 John Wiley & Sons, Inc or related companies.",
+      "matched_keyword": "copyright",
+      "char_position": {
+        "start": 69513,
+        "end": 69535
+      },
+      "extraction_method": "langextract"
+    }
+  ]
+}

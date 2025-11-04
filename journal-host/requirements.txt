@@ -1,0 +1,16 @@
+# LangExtract 核心库
+langextract>=1.0.0
+
+# OpenAI 兼容接口支持
+openai>=1.0.0
+
+# 文本处理
+regex>=2023.0.0
+
+# Markdown 转纯文本
+markdown>=3.4.0
+beautifulsoup4>=4.12.0
+
+# 其他工具
+requests>=2.31.0
+
