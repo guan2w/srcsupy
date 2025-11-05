@@ -40,7 +40,7 @@ KEY_PHRASES = [
     "compile", "in partnership with", "in cooperation with",
     "the backing of", "administrated by", "university press",
     "funded by", "published by", "publisher",
-    "copyright", "©"
+    "copyright ©", "©"
 ]
 
 # 机构类型关键词映射
@@ -48,7 +48,7 @@ TYPE_KEYWORDS = {
     "host": ["official journal of", "official publication of", "on behalf of", 
              "sponsored by", "patronage", "academy", "society"],
     "publisher": ["published by", "publisher", "university press"],
-    "copyright": ["copyright", "©", "all rights reserved"]
+    "copyright": ["copyright ©", "©", "all rights reserved"]
 }
 
 # 机构名称常见后缀（用于正则提取）

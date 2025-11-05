@@ -1,6 +1,8 @@
 # 🧩 项目名称
 
-**期刊主办单位自动抽取工具（extract.py）**
+**期刊主办单位自动抽取工具**
+
+包含单文件处理工具（extract.py）和批量处理工具（batch_snapshot.py、batch_extract.py）
 
 ---
 
@@ -298,5 +300,344 @@ python extract.py \
 ```
 [OK] Extracted 2 institutions using langextract
 [OK] Saved to d:\projects\.pre\supy\journal-host\out\wiley_host.json
+```
+
+---
+
+## 九、批量处理工具
+
+### 9.1 概述
+
+批量处理工具包含两个独立脚本：
+
+- **batch_snapshot.py**: 批量下载网页快照
+- **batch_extract.py**: 批量提取主办单位信息
+
+两个脚本可独立运行，也可串联使用，支持并行处理、断点续传和进度显示。
+
+---
+
+### 9.2 batch_snapshot.py - 批量快照工具
+
+#### 功能特点
+
+- ✅ 从 Excel 文件读取多列 URL 范围
+- ✅ 自动去重、过滤无效 URL
+- ✅ 并行下载（共享浏览器实例，多个 BrowserContext）
+- ✅ 保存 dom.html + page.mhtml 两种格式
+- ✅ Hash 分层存储（避免单目录文件过多）
+- ✅ 断点续传（从日志恢复状态）
+- ✅ 详细错误分类和日志记录
+
+#### CLI 参数
+
+| 参数名 | 必填 | 说明 |
+|--------|------|------|
+| `--url-excel` | ✅ | Excel 文件路径 |
+| `--url-ranges` | ✅ | URL 单元格范围，如 `D4:D99,F4:F99` |
+| `--sheet-name` | ⛔ | Sheet 名称或索引，默认 0（第一个 sheet） |
+| `--parallel` | ⛔ | 并行数量（覆盖配置文件，默认从 config.toml 读取） |
+
+#### 目录结构
+
+```
+输入文件.xlsx
+输入文件-snapshot/              # 快照目录
+  ├── snapshot-log.csv           # 快照日志
+  ├── ab/cd/abcdef123.../        # Hash 分层目录
+  │   ├── dom.html               # 页面 DOM 内容
+  │   ├── page.mhtml             # 完整页面归档（含资源）
+  │   ├── dom.md                 # Markdown 转换结果（extract 阶段生成）
+  │   └── host.json              # 提取结果（extract 阶段生成）
+  └── ...
+```
+
+#### snapshot-log.csv 格式
+
+```csv
+url,hash,dom_size,mhtml_size,snapshot_time,status,error_type,error_message
+https://example.com,abc123...,12345,56789,2025-11-05 10:00:00,success,,
+https://fail.com,def456...,0,0,2025-11-05 10:01:00,failed,timeout,Navigation timeout exceeded
+```
+
+#### 运行示例
+
+```bash
+# 基础用法（默认第一个 sheet）
+python batch_snapshot.py \
+  --url-excel journals.xlsx \
+  --url-ranges D4:D99,F4:F99
+
+# 指定 sheet（按索引）
+python batch_snapshot.py \
+  --url-excel journals.xlsx \
+  --url-ranges D4:D99,F4:F99 \
+  --sheet-name 1
+
+# 指定 sheet（按名称）
+python batch_snapshot.py \
+  --url-excel journals.xlsx \
+  --url-ranges D4:D99 \
+  --sheet-name "期刊列表"
+
+# 指定并行数
+python batch_snapshot.py \
+  --url-excel journals.xlsx \
+  --url-ranges D4:D99,F4:F99 \
+  --parallel 5
+
+# 断点续传（自动跳过已成功的 URL）
+python batch_snapshot.py \
+  --url-excel journals.xlsx \
+  --url-ranges D4:D99,F4:F99
+```
+
+**启动时会打印关键参数：**
+```
+============================================================
+[CONFIG] 批量快照下载工具 - 启动参数
+============================================================
+Excel 文件:    journals.xlsx
+Sheet 名称:    0
+URL 范围:      D4:D99,F4:F99
+并行数量:      3
+无头模式:      False
+代理设置:      socks5://172.24.128.1:7890
+超时时间:      60000 ms
+配置文件:      config.toml
+============================================================
+```
+
+---
+
+### 9.3 batch_extract.py - 批量提取工具
+
+#### 功能特点
+
+- ✅ 自动扫描待提取的快照目录
+- ✅ 使用 markitdown 转换 HTML 为 Markdown
+- ✅ 调用 extract.py 核心逻辑提取主办单位
+- ✅ 并行提取（多线程）
+- ✅ 失败重试机制（可配置次数和延迟）
+- ✅ 持续监听模式（--watch）
+- ✅ 详细错误日志记录
+
+#### CLI 参数
+
+| 参数名 | 必填 | 说明 |
+|--------|------|------|
+| `--input` | ✅ | Excel 文件路径或快照目录路径 |
+| `--parallel` | ⛔ | 并行数量（覆盖配置文件） |
+| `--watch` | ⛔ | 持续监听模式（定期扫描新文件） |
+| `--watch-interval` | ⛔ | 监听模式扫描间隔（秒），默认 30 |
+| `--model-id` | ⛔ | LangExtract 模型 ID（覆盖配置文件） |
+| `--api-base` | ⛔ | API 接口地址 |
+| `--api-key` | ⛔ | API Key |
+
+#### extract-log.csv 格式
+
+```csv
+hash,dom_path,snapshot_time,extract_time,status,institutions_count,error_type,error_message
+abc123...,ab/cd/abc123.../dom.html,2025-11-05 10:00:00,2025-11-05 10:05:00,success,3,,
+def456...,de/f4/def456.../dom.html,2025-11-05 10:01:00,2025-11-05 10:06:00,failed,0,api_error,Rate limit exceeded
+```
+
+#### 运行示例
+
+```bash
+# 从 Excel 文件推导快照目录
+python batch_extract.py --input journals.xlsx
+
+# 直接指定快照目录
+python batch_extract.py --input journals-snapshot/
+
+# 指定并行数和模型
+python batch_extract.py \
+  --input journals-snapshot/ \
+  --parallel 3 \
+  --model-id qwen3-vl-32b-instruct
+
+# 持续监听模式（每 30 秒扫描一次新文件）
+python batch_extract.py \
+  --input journals-snapshot/ \
+  --watch
+
+# 自定义监听间隔
+python batch_extract.py \
+  --input journals-snapshot/ \
+  --watch \
+  --watch-interval 60
+```
+
+---
+
+### 9.4 配置文件（config.toml）
+
+批量处理工具的配置从 `config.toml` 读取，命令行参数优先级更高。
+
+```toml
+[snapshot]
+headless = false
+proxy = "socks5://172.24.128.1:7890"
+timeout = 60000           # 页面加载超时（毫秒）
+wait_after_idle = 0       # 网络空闲后额外等待（毫秒）
+parallel = 3              # 并行下载数量
+
+[extract]
+parallel = 2              # 并行提取数量
+model_id = "qwen3-vl-32b-instruct"  # 默认模型
+retry_times = 3           # 失败重试次数
+retry_delay = 5           # 重试延迟（秒）
+watch_interval = 30       # watch 模式扫描间隔（秒）
+
+[api]
+# 可选：统一管理 API 配置（命令行参数优先）
+# api_key = "sk-xxx"
+# api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+```
+
+---
+
+### 9.5 并行处理技术方案
+
+#### Snapshot 并行策略
+
+使用 **一个 Browser + 多个 BrowserContext** 的方案：
+
+- 共享浏览器进程，资源高效
+- 每个 BrowserContext 完全隔离（cookies、storage、sessions）
+- 通过 `ThreadPoolExecutor` 实现并发
+- 某个任务出错不影响其他任务
+
+参考：[Playwright BrowserContext API](https://playwright.dev/docs/api/class-browsercontext)
+
+#### Extract 并行策略
+
+使用 `ThreadPoolExecutor` 多线程并行：
+
+- 适合 I/O 密集型任务（文件读写、API 调用）
+- 通过 `concurrent.futures` 管理任务队列
+- 失败重试机制保证鲁棒性
+
+---
+
+### 9.6 完整工作流程示例
+
+```bash
+# Step 1: 批量下载快照
+python batch_snapshot.py \
+  --url-excel journals.xlsx \
+  --url-ranges D4:D99,F4:F99
+
+# 输出：
+# [SNAPSHOT] 读取到 150 个 URL（去重后）
+# [SNAPSHOT] 跳过 20 个已完成的 URL
+# [SNAPSHOT] 开始处理 130 个 URL，并行数=3
+# [PROGRESS] ████████████████████ 100% (130/130)
+# [OK] 成功: 125, 失败: 5
+# [OK] 日志已保存到 journals-snapshot/snapshot-log.csv
+
+# Step 2: 批量提取信息
+python batch_extract.py \
+  --input journals.xlsx \
+  --model-id qwen3-vl-32b-instruct
+
+# 输出：
+# [EXTRACT] 发现 125 个待提取的快照
+# [EXTRACT] 开始提取，并行数=2
+# [PROGRESS] ████████████████████ 100% (125/125)
+# [OK] 成功: 120, 失败: 5
+# [OK] 日志已保存到 journals-snapshot/extract-log.csv
+
+# Step 3: 持续监听新快照（可选）
+python batch_extract.py \
+  --input journals-snapshot/ \
+  --watch
+# [WATCH] 监听模式启动，每 30 秒扫描一次...
+# [WATCH] 发现 3 个新文件，开始提取...
+```
+
+---
+
+### 9.7 错误处理与日志
+
+#### 错误分类
+
+**snapshot-log.csv 错误类型：**
+
+- `timeout` - 页面加载超时
+- `network_error` - 网络连接错误
+- `invalid_url` - 无效的 URL 格式
+- `http_error` - HTTP 错误（404, 500 等）
+- `unknown` - 未知错误
+
+**extract-log.csv 错误类型：**
+
+- `file_not_found` - dom.html 文件不存在
+- `conversion_error` - HTML 转 Markdown 失败
+- `api_error` - LangExtract API 调用失败
+- `rate_limit` - API 频率限制
+- `unknown` - 未知错误
+
+#### 日志查看
+
+```bash
+# 查看快照失败的 URL
+grep "failed" journals-snapshot/snapshot-log.csv
+
+# 查看提取失败的记录
+grep "failed" journals-snapshot/extract-log.csv
+
+# 统计成功率
+grep -c "success" journals-snapshot/snapshot-log.csv
+```
+
+---
+
+### 9.8 更新后的文件结构
+
+```
+journal-host/
+├── extract.py              # 单文件提取脚本
+├── snapshot.py             # 单页面快照脚本
+├── batch_snapshot.py       # 批量快照脚本（新增）
+├── batch_extract.py        # 批量提取脚本（新增）
+├── config.toml             # 配置文件
+├── README.md               # 项目说明
+├── requirements.txt        # Python 依赖包
+├── examples/
+│   └── wiley.md
+└── out/
+    └── wiley_host.json
+```
+
+---
+
+## 十、依赖包更新
+
+批量处理工具需要额外的依赖包：
+
+```txt
+# 原有依赖
+langextract>=1.0.0
+openai>=1.0.0
+regex>=2023.0.0
+markdown>=3.4.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
+# 新增依赖
+pandas>=2.0.0              # Excel 处理
+openpyxl>=3.1.0            # pandas Excel 引擎
+markitdown>=0.0.1          # HTML 转 Markdown
+tqdm>=4.66.0               # 进度条
+playwright>=1.40.0         # 浏览器自动化
+```
+
+安装所有依赖：
+
+```bash
+pip install -r requirements.txt
+playwright install chromium  # 安装 Chromium 浏览器
 ```
 
