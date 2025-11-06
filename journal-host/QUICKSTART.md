@@ -109,7 +109,31 @@ python batch_extract.py --input journals-snapshot/
 - 提取结果：`ab/cd/abcdef.../host.json`
 - 日志文件：`journals-snapshot/extract-log.csv`
 
-### Step 3: 持续监听模式（可选）
+### Step 3: 数据整合（生成最终报告）
+
+```bash
+# 整合所有提取结果到 Excel 文件
+python combine_output.py \
+  --input-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
+```
+
+**参数说明：**
+- `--input-excel`: 原始 Excel 文件
+- `--name-column`: 期刊名称所在列（如 A 列）
+- `--url-columns`: URL 所在列（多列用逗号分隔，如 D,F）
+- `--rows`: 行范围
+  - `4+`: 从第 4 行开始，遇到空行停止
+  - `4-99`: 读取第 4 到 99 行
+
+**输出：**
+- 输出文件：`journals-snapshot/journals.xlsx-output-251106.143022.xlsx`
+- 包含 7 列：期刊名称、来源链接、匹配机构、匹配关键词、匹配句子、提取方法、链接hash
+- 包含所有记录（成功和失败），失败记录通过状态标注
+
+### Step 4: 持续监听模式（可选）
 
 如果您希望在快照下载的同时进行提取，可以使用监听模式：
 
@@ -131,6 +155,35 @@ python batch_extract.py \
 ---
 
 ## 📊 查看结果
+
+### 查看整合输出
+
+数据整合后会生成一个 Excel 文件，包含所有期刊的提取结果：
+
+```bash
+# 使用 Excel 或 LibreOffice 打开输出文件
+# journals-snapshot/journals.xlsx-output-251106.143022.xlsx
+
+# 或使用命令行查看（需要安装 csvkit）
+in2csv journals-snapshot/journals.xlsx-output-*.xlsx | head -20
+```
+
+输出文件包含 7 列：
+1. **期刊名称** - 从原始 Excel 读取
+2. **来源链接** - URL
+3. **匹配机构** - 机构名称或状态标注
+4. **匹配关键词** - 如 "official journal of"
+5. **匹配句子** - 完整原始句子
+6. **提取方法** - langextract 或 regexp
+7. **链接hash** - SHA1 hash
+
+状态标注示例：
+- ✅ 成功：显示具体机构名称
+- ⏳ 待快照
+- ❌ 快照失败 (timeout)
+- ⏳ 待提取
+- ❌ 提取失败 (api_error)
+- ⚠️ 无匹配
 
 ### 查看日志
 

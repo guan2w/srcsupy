@@ -600,8 +600,9 @@ grep -c "success" journals-snapshot/snapshot-log.csv
 journal-host/
 ├── extract.py              # 单文件提取脚本
 ├── snapshot.py             # 单页面快照脚本
-├── batch_snapshot.py       # 批量快照脚本（新增）
-├── batch_extract.py        # 批量提取脚本（新增）
+├── batch_snapshot.py       # 批量快照脚本
+├── batch_extract.py        # 批量提取脚本
+├── combine_output.py       # 数据整合脚本（新增）
 ├── config.toml             # 配置文件
 ├── README.md               # 项目说明
 ├── requirements.txt        # Python 依赖包
@@ -609,6 +610,167 @@ journal-host/
 │   └── wiley.md
 └── out/
     └── wiley_host.json
+```
+
+---
+
+### 9.9 combine_output.py - 数据整合工具
+
+#### 功能特点
+
+- ✅ 从原始 Excel 读取期刊名称和 URL
+- ✅ 支持一个期刊对应多个 URL 列（如 D 列和 F 列）
+- ✅ 灵活的行范围指定（如 "4+" 遍历到空行，或 "4-99" 固定范围）
+- ✅ 关联快照和提取日志，合并生成完整报告
+- ✅ 一个 URL 多个机构时，每个机构占一行
+- ✅ 包含失败记录，通过状态标注（待快照、快照失败、待提取、提取失败、无匹配等）
+- ✅ 自动生成带时间戳的输出文件
+
+#### CLI 参数
+
+| 参数名 | 必填 | 说明 |
+|--------|------|------|
+| `--input-excel` | ✅ | 输入 Excel 文件路径 |
+| `--sheet-name` | ⛔ | Sheet 名称或索引，默认 0（第一个 sheet） |
+| `--name-column` | ✅ | 期刊名称列，如 "A" |
+| `--url-columns` | ✅ | URL 列（多列用逗号分隔），如 "D,F" |
+| `--rows` | ✅ | 行范围，如 "4+" 或 "4-99" |
+
+#### 行范围说明
+
+- **"4+"**: 从第 4 行开始读取，直到 name-column 为空时停止（自动遍历）
+- **"4-99"**: 读取第 4 行到第 99 行（固定范围）
+
+#### 输出格式
+
+输出 Excel 文件包含以下 7 列：
+
+| 列名 | 说明 |
+|------|------|
+| 期刊名称 | 从原始 Excel 的 name-column 读取 |
+| 来源链接 | URL |
+| 匹配机构 | 机构名称（或状态标注） |
+| 匹配关键词 | 如 "official journal of"、"copyright" 等 |
+| 匹配句子 | 完整原始句子 |
+| 提取方法 | langextract 或 regexp |
+| 链接hash | URL 的 SHA1 hash |
+
+**状态标注**：
+- 待快照
+- 快照失败 (timeout/network_error/...)
+- 待提取
+- 提取失败 (api_error/rate_limit/...)
+- 无匹配
+- 无URL
+
+#### 运行示例
+
+```bash
+# 基础用法（自动遍历到空行）
+python combine_output.py \
+  --input-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
+
+# 指定固定行范围
+python combine_output.py \
+  --input-excel journals.xlsx \
+  --sheet-name 0 \
+  --name-column A \
+  --url-columns D \
+  --rows 4-99
+
+# 指定 sheet 名称
+python combine_output.py \
+  --input-excel journals.xlsx \
+  --sheet-name "期刊列表" \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
+```
+
+**输出示例**：
+```
+============================================================
+[CONFIG] 数据整合工具 - 启动参数
+============================================================
+Excel 文件:    journals.xlsx
+Sheet 名称:    0
+期刊名称列:    A
+URL 列:        D,F
+行范围:        4+
+============================================================
+
+[INFO] 实际读取行范围: 4-152
+[COMBINE] 读取到 149 个期刊
+[COMBINE] 共 238 个 URL
+[COMBINE] 加载快照日志...
+[COMBINE] 快照记录: 235 个
+[COMBINE] 加载提取日志...
+[COMBINE] 提取记录: 228 个
+[COMBINE] 整合数据...
+[COMBINE] 写入输出文件...
+[OK] 输出文件已保存: journals-snapshot/journals.xlsx-output-251106.143022.xlsx
+     总行数: 512
+
+[OK] 整合完成
+     成功提取: 456 行
+     失败/待处理: 56 行
+     输出文件: journals-snapshot/journals.xlsx-output-251106.143022.xlsx
+```
+
+#### 输出文件命名规则
+
+`{input-excel}-output-$YYMMDD.hhmmss.xlsx`
+
+例如：
+- 输入：`journals.xlsx`
+- 输出：`journals.xlsx-output-251106.143022.xlsx`
+
+文件保存在快照目录下（如 `journals-snapshot/`）
+
+#### 数据关联流程
+
+```
+原始 Excel (journals.xlsx)
+  ├─ 期刊名称列 (A)
+  └─ URL 列 (D, F)
+       ↓ 计算 SHA1(URL) = hash
+       ↓
+快照目录 (journals-snapshot/)
+  ├─ snapshot-log.csv  (hash -> url, snapshot_status)
+  ├─ extract-log.csv   (hash -> extract_status)
+  └─ ab/cd/abcdef.../host.json (机构详细信息)
+       ↓ 数据整合
+       ↓
+输出 Excel (journals.xlsx-output-YYMMDD.hhmmss.xlsx)
+  └─ 7 列完整报告（包含成功和失败记录）
+```
+
+---
+
+### 9.10 完整工作流程（含数据整合）
+
+```bash
+# Step 1: 批量下载快照
+python batch_snapshot.py \
+  --url-excel journals.xlsx \
+  --url-ranges D4:D99,F4:F99
+
+# Step 2: 批量提取信息
+python batch_extract.py \
+  --input journals.xlsx \
+  --model-id qwen3-vl-32b-instruct
+
+# Step 3: 数据整合（生成最终报告）
+python combine_output.py \
+  --input-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
+
+# 输出：journals-snapshot/journals.xlsx-output-251106.143022.xlsx
 ```
 
 ---

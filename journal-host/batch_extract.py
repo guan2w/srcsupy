@@ -160,6 +160,33 @@ def log_result(log_file: Path, result: Dict[str, Any]):
         print(f"[ERROR] Failed to write log: {e}", file=sys.stderr)
 
 
+def load_completed_hashes(log_file: Path) -> set:
+    """从日志文件加载已完成的 hash"""
+    completed = set()
+    
+    if not log_file.exists():
+        return completed
+    
+    try:
+        with open(log_file, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.reader(f)
+            next(reader, None)  # 跳过表头
+            
+            for row in reader:
+                if len(row) >= 5:
+                    hash_value = row[0]
+                    status = row[4]
+                    
+                    # 只记录成功的
+                    if status == 'success':
+                        completed.add(hash_value)
+    
+    except Exception as e:
+        print(f"[WARNING] Failed to load completed hashes: {e}", file=sys.stderr)
+    
+    return completed
+
+
 # ========== 提取处理 ==========
 
 def convert_html_to_markdown(html_file: Path, md_file: Path) -> bool:
@@ -344,9 +371,23 @@ def process_snapshots(snapshot_dir: Path, config: Dict[str, Any], parallel: int,
     target_dirs = find_snapshot_dirs(snapshot_dir)
     
     if not target_dirs:
+        print("[EXTRACT] 未发现待提取的快照")
         return 0, 0
     
-    print(f"[EXTRACT] 发现 {len(target_dirs)} 个待提取的快照")
+    print(f"[EXTRACT] 扫描到 {len(target_dirs)} 个快照目录")
+    
+    # 加载已完成的 hash
+    completed_hashes = load_completed_hashes(log_file)
+    remaining_dirs = [d for d in target_dirs if d.name not in completed_hashes]
+    
+    if completed_hashes:
+        print(f"[EXTRACT] 跳过 {len(completed_hashes)} 个已完成的快照")
+    
+    if not remaining_dirs:
+        print("[OK] 所有快照已完成提取")
+        return 0, 0
+    
+    print(f"[EXTRACT] 开始处理 {len(remaining_dirs)} 个快照，并行数={parallel}")
     
     extract_config = config.get('extract', {})
     retry_times = extract_config.get('retry_times', 3)
@@ -360,12 +401,12 @@ def process_snapshots(snapshot_dir: Path, config: Dict[str, Any], parallel: int,
         # 提交任务
         future_to_dir = {
             executor.submit(process_hash_dir, hash_dir, config, retry_times, retry_delay): hash_dir
-            for hash_dir in target_dirs
+            for hash_dir in remaining_dirs
         }
         
         # 使用进度条
         if TQDM_AVAILABLE:
-            progress = tqdm(total=len(target_dirs), desc="[PROGRESS]", unit="file")
+            progress = tqdm(total=len(remaining_dirs), desc="[PROGRESS]", unit="file")
         
         # 处理完成的任务
         for future in as_completed(future_to_dir):
@@ -513,14 +554,23 @@ def main():
     if args.watch:
         print(f"[WATCH] 监听模式启动，每 {watch_interval} 秒扫描一次...")
         print("[WATCH] 按 Ctrl+C 停止监听")
+        print()
         
         try:
+            round_count = 0
             while True:
+                round_count += 1
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"[WATCH] [{timestamp}] 第 {round_count} 轮扫描...")
+                
                 success, failed = process_snapshots(snapshot_dir, config, parallel, log_file)
                 
                 if success > 0 or failed > 0:
                     print(f"[WATCH] 本轮处理完成 - 成功: {success}, 失败: {failed}")
+                else:
+                    print(f"[WATCH] 无新文件，等待中...")
                 
+                print()
                 time.sleep(watch_interval)
         
         except KeyboardInterrupt:
@@ -528,8 +578,6 @@ def main():
     
     else:
         # 一次性处理
-        print(f"[EXTRACT] 开始提取，并行数={parallel}")
-        
         success, failed = process_snapshots(snapshot_dir, config, parallel, log_file)
         
         # 输出统计
@@ -541,4 +589,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
