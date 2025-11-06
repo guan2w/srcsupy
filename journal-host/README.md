@@ -36,6 +36,7 @@
   | `--output`   | ⛔  | 输出 JSON 文件路径（若不提供，则打印到 stdout）                        |
   | `--api-base` | ⛔  | OpenAI 兼容模型接口地址，如 DashScope 或本地代理                     |
   | `--api-key`  | ⛔  | 模型 API Key                                            |
+  | `--extract-method` | ⛔  | 提取方法：`auto`（默认，AI优先+规则回退）、`langextract`（仅AI）、`regexp`（仅规则） |
 
 ---
 
@@ -45,6 +46,11 @@
 
   ```json
   {
+    "extraction_metadata": {
+      "method": "langextract",
+      "model": "gpt-4o-mini",
+      "timestamp": "2025-11-06 14:30:22"
+    },
     "host_institutions": [
       {
         "name": "European Academy of Allergy and Clinical Immunology (EAACI)",
@@ -68,12 +74,17 @@
 
 * 说明：
 
-  * `name`：机构原文名（已清理 Markdown、版权符号、年份等）
-  * `type`：机构类型（`host` 主办方 / `publisher` 出版方 / `copyright` 版权方）
-  * `source_sentence`：完整原始句子（**纯文本，不含任何 Markdown 格式字符**）
-  * `matched_keyword`：匹配到的关键短语（如 "official journal of"、"copyright" 等）
-  * `char_position`：在原文中的字符位置（可选）
-  * `extraction_method`：提取方式（`langextract` 或 `regexp`）
+  * `extraction_metadata`：提取元数据
+    * `method`：实际使用的方法（`langextract` 或 `regexp`）
+    * `model`：使用的模型 ID（仅 langextract 方法）
+    * `timestamp`：提取时间
+  * `host_institutions`：提取的机构列表
+    * `name`：机构原文名（已清理 Markdown、版权符号、年份等）
+    * `type`：机构类型（`host` 主办方 / `publisher` 出版方 / `copyright` 版权方）
+    * `source_sentence`：完整原始句子（**纯文本，不含任何 Markdown 格式字符**）
+    * `matched_keyword`：匹配到的关键短语（如 "official journal of"、"copyright" 等）
+    * `char_position`：在原文中的字符位置（可选）
+    * `extraction_method`：提取方式（`langextract` 或 `regexp`）
 
 * **错误输出格式**
 
@@ -134,11 +145,24 @@
 
 ### 3️⃣ 回退规则（Rule-based Fallback）
 
-规则回退策略：
+提取方法与策略（通过 `--extract-method` 参数指定）：
 
-* **API 调用失败**：完全回退到 regexp 规则抽取
-* **返回空结果**：回退到 regexp 规则抽取
-* **返回部分结果**：仅输出 LangExtract 结果（标注 `extraction_method: "langextract"`）
+1. **auto（默认）**：智能模式
+   - 优先使用 LangExtract（AI 提取）
+   - 如果 API 调用失败或返回空结果，自动回退到 regexp（规则提取）
+   - 根据实际使用的方法保存到对应文件：
+     - 成功使用 AI → `host-langextract.json`
+     - 回退到规则 → `host-regexp.json`
+
+2. **langextract**：仅使用 AI
+   - 只使用 LangExtract 进行智能提取
+   - 失败时不回退，直接报错
+   - 适合追求高质量结果的场景
+
+3. **regexp**：仅使用规则
+   - 只使用正则表达式规则提取
+   - 稳定但精度相对较低
+   - 适合无 API 配置或快速批量处理的场景
 
 regexp 规则抽取逻辑：
 
@@ -350,7 +374,8 @@ python extract.py \
   │   ├── dom.html               # 页面 DOM 内容
   │   ├── page.mhtml             # 完整页面归档（含资源）
   │   ├── dom.md                 # Markdown 转换结果（extract 阶段生成）
-  │   └── host.json              # 提取结果（extract 阶段生成）
+  │   ├── host-langextract.json  # AI 提取结果（extract 阶段生成）
+  │   └── host-regexp.json       # 规则提取结果（extract 阶段生成）
   └── ...
 ```
 
@@ -448,13 +473,15 @@ URL 列:        D,F
 | `--model-id` | ⛔ | LangExtract 模型 ID（覆盖配置文件） |
 | `--api-base` | ⛔ | API 接口地址 |
 | `--api-key` | ⛔ | API Key |
+| `--extract-method` | ⛔ | 提取方法：`auto`（默认）、`langextract`、`regexp` |
+| `--force` | ⛔ | 强制重新提取（忽略已存在的结果文件） |
 
 #### extract-log.csv 格式
 
 ```csv
-hash,url,snapshot_time,extract_time,status,institutions_count,error_type,error_message
-abc123...,https://example.com,2025-11-05 10:00:00,2025-11-05 10:05:00,success,3,,
-def456...,https://fail.com,2025-11-05 10:01:00,2025-11-05 10:06:00,failed,0,api_error,Rate limit exceeded
+hash,url,snapshot_time,extract_time,status,institutions_count,extract_method,error_type,error_message
+abc123...,https://example.com,2025-11-05 10:00:00,2025-11-05 10:05:00,success,3,langextract,,
+def456...,https://fail.com,2025-11-05 10:01:00,2025-11-05 10:06:00,failed,0,,api_error,Rate limit exceeded
 ```
 
 #### 运行示例
@@ -606,6 +633,7 @@ python combine_output.py \
 - `conversion_error` - HTML 转 Markdown 失败
 - `api_error` - LangExtract API 调用失败
 - `rate_limit` - API 频率限制
+- `config_error` - LangExtract 不可用或 API 密钥未配置
 - `unknown` - 未知错误
 
 #### 日志查看

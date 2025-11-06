@@ -212,9 +212,15 @@ def get_hash_path(snapshot_dir: Path, url_hash: str) -> Path:
     return snapshot_dir / url_hash[:2] / url_hash[2:4] / url_hash[4:]
 
 
-def get_url_hash_dirs(snapshot_dir: Path, urls: List[str]) -> List[Tuple[str, Path, str]]:
+def get_url_hash_dirs(snapshot_dir: Path, urls: List[str], extract_method: str = 'auto', force: bool = False) -> List[Tuple[str, Path, str]]:
     """
     根据 URL 列表获取对应的 hash 目录
+    
+    Args:
+        snapshot_dir: 快照目录
+        urls: URL 列表
+        extract_method: 提取方法 ('langextract', 'regexp', 'auto')
+        force: 是否强制重新提取
     
     Returns:
         List[(url, hash_dir, status)]
@@ -226,13 +232,23 @@ def get_url_hash_dirs(snapshot_dir: Path, urls: List[str]) -> List[Tuple[str, Pa
         url_hash = sha1_hex(url)
         hash_path = get_hash_path(snapshot_dir, url_hash)
         dom_file = hash_path / "dom.html"
-        json_file = hash_path / "host.json"
+        
+        # 根据 extract_method 确定需要检查的文件
+        if extract_method == 'langextract':
+            json_file = hash_path / "host-langextract.json"
+        elif extract_method == 'regexp':
+            json_file = hash_path / "host-regexp.json"
+        else:  # auto
+            # auto 模式下，任意一个文件存在就算已提取
+            langextract_file = hash_path / "host-langextract.json"
+            regexp_file = hash_path / "host-regexp.json"
+            json_file = langextract_file if langextract_file.exists() else (regexp_file if regexp_file.exists() else None)
         
         if not dom_file.exists():
             # 快照不存在
             url_info.append((url, hash_path, 'no_snapshot'))
-        elif json_file.exists():
-            # 已提取
+        elif not force and (json_file is not None if extract_method == 'auto' else json_file.exists()):
+            # 已提取（除非 force=True）
             url_info.append((url, hash_path, 'already_extracted'))
         else:
             # 准备提取
@@ -250,7 +266,7 @@ def init_log_file(log_file: Path):
         with open(log_file, 'w', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['hash', 'url', 'snapshot_time', 'extract_time', 
-                           'status', 'institutions_count', 'error_type', 'error_message'])
+                           'status', 'institutions_count', 'extract_method', 'error_type', 'error_message'])
 
 
 def log_result(log_file: Path, result: Dict[str, Any]):
@@ -265,6 +281,7 @@ def log_result(log_file: Path, result: Dict[str, Any]):
                 result.get('extract_time', ''),
                 result['status'],
                 result.get('institutions_count', 0),
+                result.get('extract_method', ''),
                 result.get('error_type', ''),
                 result.get('error_message', '')
             ])
@@ -294,16 +311,25 @@ def convert_html_to_markdown(html_file: Path, md_file: Path) -> bool:
         return False
 
 
-def extract_institutions(md_file: Path, json_file: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+def extract_institutions(md_file: Path, json_file: Path, config: Dict[str, Any], extract_method: str = 'auto', retry_times: int = 3, retry_delay: int = 5) -> Dict[str, Any]:
     """
     从 Markdown 文件提取主办单位信息
     
+    Args:
+        md_file: Markdown 输入文件
+        json_file: JSON 输出文件
+        config: 配置字典
+        extract_method: 提取方法 ('langextract', 'regexp', 'auto')
+        retry_times: 重试次数（用于 API 频率限制）
+        retry_delay: 重试延迟（秒）
+    
     Returns:
-        提取结果字典
+        提取结果字典（包含 success, institutions_count, extract_method, error_type, error_message）
     """
     result = {
         'success': False,
         'institutions_count': 0,
+        'extract_method': '',
         'error_type': '',
         'error_message': ''
     }
@@ -320,43 +346,125 @@ def extract_institutions(md_file: Path, json_file: Path, config: Dict[str, Any])
         api_key = api_config.get('api_key') or os.environ.get('OPENAI_API_KEY') or os.environ.get('LANGEXTRACT_API_KEY')
         api_base = api_config.get('api_base') or os.environ.get('OPENAI_API_BASE')
         
-        # 尝试使用 LangExtract
+        # 根据 extract_method 决定提取策略
         institutions = []
-        if LANGEXTRACT_AVAILABLE and api_key:
-            try:
-                institutions = extract_with_langextract(
-                    text,
-                    model_id=model_id,
-                    api_key=api_key,
-                    api_base=api_base
-                )
-            except Exception as e:
-                error_msg = str(e)
-                
-                # 检查是否是频率限制
-                if 'rate' in error_msg.lower() or 'limit' in error_msg.lower():
-                    result['error_type'] = 'rate_limit'
-                    result['error_message'] = error_msg
-                    print(f"\n[RATE LIMIT] {error_msg}", file=sys.stderr)
-                    print("[INFO] 建议在 config.toml 中调整 extract.parallel 或增加 retry_delay", file=sys.stderr)
-                    raise  # 抛出异常以便重试
-                else:
-                    result['error_type'] = 'api_error'
-                    result['error_message'] = error_msg
-                    print(f"[WARNING] LangExtract failed: {error_msg}", file=sys.stderr)
+        actual_method = None
         
-        # 回退到 regexp
-        if not institutions:
+        if extract_method == 'regexp':
+            # 仅使用 regexp
             institutions = extract_with_regexp(text)
+            actual_method = 'regexp'
+            
+        elif extract_method == 'langextract':
+            # 仅使用 langextract（带重试）
+            if not LANGEXTRACT_AVAILABLE:
+                result['error_type'] = 'config_error'
+                result['error_message'] = 'LangExtract not available'
+                return result
+            
+            if not api_key:
+                result['error_type'] = 'config_error'
+                result['error_message'] = 'API key not configured'
+                return result
+            
+            # 重试逻辑
+            last_error = None
+            for attempt in range(retry_times):
+                try:
+                    institutions = extract_with_langextract(
+                        text,
+                        model_id=model_id,
+                        api_key=api_key,
+                        api_base=api_base
+                    )
+                    actual_method = 'langextract'
+                    break  # 成功则跳出重试循环
+                except Exception as e:
+                    last_error = e
+                    error_msg = str(e)
+                    
+                    # 检查是否是频率限制
+                    if 'rate' in error_msg.lower() or 'limit' in error_msg.lower() or '429' in error_msg:
+                        if attempt < retry_times - 1:
+                            wait_time = retry_delay * (attempt + 1)
+                            print(f"\n[RATE LIMIT] API 频率限制，等待 {wait_time} 秒后重试 (第 {attempt + 1}/{retry_times} 次)...", file=sys.stderr)
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            result['error_type'] = 'rate_limit'
+                            result['error_message'] = error_msg
+                            print(f"\n[ERROR] API 频率限制，{retry_times} 次重试均失败", file=sys.stderr)
+                            raise
+                    else:
+                        # 非频率限制错误，直接失败
+                        result['error_type'] = 'api_error'
+                        result['error_message'] = error_msg
+                        raise
+                    
+        else:  # auto
+            # 优先使用 LangExtract（带重试），全部失败后回退到 regexp
+            langextract_failed = False
+            if LANGEXTRACT_AVAILABLE and api_key:
+                last_error = None
+                for attempt in range(retry_times):
+                    try:
+                        institutions = extract_with_langextract(
+                            text,
+                            model_id=model_id,
+                            api_key=api_key,
+                            api_base=api_base
+                        )
+                        if institutions:
+                            actual_method = 'langextract'
+                            break  # 成功则跳出重试循环
+                    except Exception as e:
+                        last_error = e
+                        error_msg = str(e)
+                        
+                        # 检查是否是频率限制
+                        if 'rate' in error_msg.lower() or 'limit' in error_msg.lower() or '429' in error_msg:
+                            if attempt < retry_times - 1:
+                                wait_time = retry_delay * (attempt + 1)
+                                print(f"\n[RATE LIMIT] API 频率限制，等待 {wait_time} 秒后重试 (第 {attempt + 1}/{retry_times} 次)...", file=sys.stderr)
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                # 所有重试都失败
+                                print(f"\n[WARNING] LangExtract {retry_times} 次重试均失败: {error_msg}", file=sys.stderr)
+                                print(f"[INFO] 回退到 regexp 方法", file=sys.stderr)
+                                langextract_failed = True
+                                break
+                        else:
+                            # 非频率限制错误，直接回退
+                            print(f"[WARNING] LangExtract 失败: {error_msg}", file=sys.stderr)
+                            print(f"[INFO] 回退到 regexp 方法", file=sys.stderr)
+                            langextract_failed = True
+                            break
+            
+            # 如果 LangExtract 失败或不可用，回退到 regexp
+            if not institutions:
+                institutions = extract_with_regexp(text)
+                actual_method = 'regexp'
         
-        # 保存结果
-        output_data = {"host_institutions": institutions}
+        # 保存结果（包含元数据）
+        output_data = {
+            "extraction_metadata": {
+                "method": actual_method,
+                "model": model_id if actual_method == 'langextract' else None,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            },
+            "host_institutions": institutions
+        }
         
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(output_data, f, ensure_ascii=False, indent=2)
         
         result['success'] = True
         result['institutions_count'] = len(institutions)
+        result['extract_method'] = actual_method
+        
+        # 打印成功信息
+        print(f"[SUCCESS] 提取成功: {len(institutions)} 个机构 -> {json_file.absolute()}", file=sys.stderr)
         
     except Exception as e:
         if not result['error_type']:  # 如果还没有设置错误类型
@@ -366,9 +474,17 @@ def extract_institutions(md_file: Path, json_file: Path, config: Dict[str, Any])
     return result
 
 
-def process_url(url: str, hash_dir: Path, config: Dict[str, Any], retry_times: int = 3, retry_delay: int = 5) -> Dict[str, Any]:
+def process_url(url: str, hash_dir: Path, config: Dict[str, Any], extract_method: str = 'auto', retry_times: int = 3, retry_delay: int = 5) -> Dict[str, Any]:
     """
     处理单个 URL 的提取
+    
+    Args:
+        url: URL 地址
+        hash_dir: Hash 目录路径
+        config: 配置字典
+        extract_method: 提取方法 ('langextract', 'regexp', 'auto')
+        retry_times: 重试次数
+        retry_delay: 重试延迟（秒）
     
     Returns:
         处理结果字典
@@ -376,7 +492,17 @@ def process_url(url: str, hash_dir: Path, config: Dict[str, Any], retry_times: i
     hash_name = hash_dir.name
     dom_file = hash_dir / "dom.html"
     md_file = hash_dir / "dom.md"
-    json_file = hash_dir / "host.json"
+    
+    # 根据 extract_method 决定输出文件名
+    if extract_method == 'langextract':
+        json_file = hash_dir / "host-langextract.json"
+    elif extract_method == 'regexp':
+        json_file = hash_dir / "host-regexp.json"
+    else:  # auto
+        # auto 模式下，先尝试 langextract，成功则保存到 host-langextract.json
+        # 失败回退到 regexp，保存到 host-regexp.json
+        # 这里先设置为 None，后面根据实际方法决定
+        json_file = None
     
     result = {
         'hash': hash_name,
@@ -384,6 +510,7 @@ def process_url(url: str, hash_dir: Path, config: Dict[str, Any], retry_times: i
         'extract_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'status': 'failed',
         'institutions_count': 0,
+        'extract_method': '',
         'error_type': '',
         'error_message': ''
     }
@@ -408,39 +535,50 @@ def process_url(url: str, hash_dir: Path, config: Dict[str, Any], retry_times: i
             result['error_message'] = 'Failed to convert HTML to Markdown'
             return result
     
-    # 提取信息（带重试）
-    last_exception = None
-    for attempt in range(retry_times):
-        try:
-            extract_result = extract_institutions(md_file, json_file, config)
-            
-            if extract_result['success']:
-                result['status'] = 'success'
-                result['institutions_count'] = extract_result['institutions_count']
-                return result
-            else:
-                # 如果是频率限制，等待后重试
-                if extract_result['error_type'] == 'rate_limit':
-                    if attempt < retry_times - 1:
-                        time.sleep(retry_delay * (attempt + 1))  # 递增等待时间
-                        continue
-                
-                # 其他错误直接返回
-                result['error_type'] = extract_result['error_type']
-                result['error_message'] = extract_result['error_message']
-                return result
+    # 提取信息（重试逻辑在 extract_institutions 内部）
+    try:
+        # 对于 auto 模式，先用临时文件名
+        temp_json_file = json_file or hash_dir / "temp.json"
         
-        except Exception as e:
-            last_exception = e
-            if attempt < retry_times - 1:
-                time.sleep(retry_delay)
+        extract_result = extract_institutions(
+            md_file, 
+            temp_json_file, 
+            config, 
+            extract_method,
+            retry_times,
+            retry_delay
+        )
+        
+        if extract_result['success']:
+            # 对于 auto 模式，根据实际方法决定最终文件名
+            if extract_method == 'auto':
+                actual_method = extract_result.get('extract_method', 'regexp')
+                if actual_method == 'langextract':
+                    final_json_file = hash_dir / "host-langextract.json"
+                else:
+                    final_json_file = hash_dir / "host-regexp.json"
+                
+                # 重命名临时文件到最终文件名
+                if temp_json_file.exists() and temp_json_file != final_json_file:
+                    temp_json_file.rename(final_json_file)
+                    # 更新成功打印信息显示的路径
+                    print(f"[INFO] 文件已保存到: {final_json_file.absolute()}", file=sys.stderr)
+            
+            result['status'] = 'success'
+            result['institutions_count'] = extract_result['institutions_count']
+            result['extract_method'] = extract_result.get('extract_method', extract_method)
+            return result
+        else:
+            # 提取失败
+            result['error_type'] = extract_result['error_type']
+            result['error_message'] = extract_result['error_message']
+            result['extract_method'] = extract_result.get('extract_method', extract_method)
+            return result
     
-    # 所有重试都失败
-    if last_exception:
+    except Exception as e:
         result['error_type'] = 'unknown'
-        result['error_message'] = str(last_exception)[:200]
-    
-    return result
+        result['error_message'] = str(e)[:200]
+        return result
 
 
 # ========== 主函数 ==========
@@ -512,6 +650,17 @@ def main():
         default=None,
         help='API Key'
     )
+    parser.add_argument(
+        '--extract-method',
+        choices=['langextract', 'regexp', 'auto'],
+        default='auto',
+        help='提取方法：langextract（仅 AI）、regexp（仅规则）、auto（AI 优先，失败回退规则）（默认: auto）'
+    )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='强制重新提取（忽略已存在的结果文件）'
+    )
     
     args = parser.parse_args()
     
@@ -564,6 +713,8 @@ def main():
     print(f"期刊名称列:    {args.name_column}")
     print(f"URL 列:        {args.url_columns}")
     print(f"行范围:        {args.rows}")
+    print(f"提取方法:      {args.extract_method}")
+    print(f"强制重提取:    {'是' if args.force else '否'}")
     print(f"并行数量:      {parallel}")
     print(f"模型 ID:       {extract_config.get('model_id', 'gpt-4o-mini')}")
     print(f"API Base:      {api_config.get('api_base', 'from env')}")
@@ -616,7 +767,7 @@ def main():
     
     # 获取 URL 对应的 hash 目录和状态
     print(f"[EXTRACT] 检查快照状态...")
-    url_info = get_url_hash_dirs(snapshot_dir, urls)
+    url_info = get_url_hash_dirs(snapshot_dir, urls, args.extract_method, args.force)
     
     # 统计各种状态
     ready_urls = [(url, path) for url, path, status in url_info if status == 'ready']
@@ -645,11 +796,12 @@ def main():
     # 并行处理
     success_count = 0
     failed_count = 0
+    method_stats = {'langextract': 0, 'regexp': 0}  # 统计各方法的使用次数
     
     with ThreadPoolExecutor(max_workers=parallel) as executor:
         # 提交任务
         future_to_url = {
-            executor.submit(process_url, url, hash_dir, config, retry_times, retry_delay): (url, hash_dir)
+            executor.submit(process_url, url, hash_dir, config, args.extract_method, retry_times, retry_delay): (url, hash_dir)
             for url, hash_dir in ready_urls
         }
         
@@ -670,6 +822,10 @@ def main():
                 # 统计
                 if result['status'] == 'success':
                     success_count += 1
+                    # 统计方法使用次数
+                    method = result.get('extract_method', '')
+                    if method in method_stats:
+                        method_stats[method] += 1
                 else:
                     failed_count += 1
                     print(f"\n[FAILED] {url}: {result.get('error_type', 'unknown')}")
@@ -688,6 +844,7 @@ def main():
                     'url': url,
                     'extract_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     'status': 'failed',
+                    'extract_method': '',
                     'error_type': 'unknown',
                     'error_message': str(e)[:200]
                 })
@@ -700,7 +857,12 @@ def main():
     
     # 输出统计
     print(f"\n[OK] 提取完成")
-    print(f"     成功: {success_count}")
+    if args.extract_method == 'auto' and success_count > 0:
+        # auto 模式下显示方法统计
+        method_detail = f"langextract: {method_stats['langextract']}, regexp: {method_stats['regexp']}"
+        print(f"     成功: {success_count} ({method_detail})")
+    else:
+        print(f"     成功: {success_count}")
     print(f"     失败: {failed_count}")
     print(f"     跳过: {len(already_extracted) + len(no_snapshot)} (已提取: {len(already_extracted)}, 无快照: {len(no_snapshot)})")
     print(f"     日志: {log_file}")

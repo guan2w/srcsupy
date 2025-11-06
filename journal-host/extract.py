@@ -293,7 +293,7 @@ def extract_with_langextract(
     Use exact text from the document without paraphrasing.
     """.strip()
     
-    # Few-shot 示例
+    # Few-shot 示例（添加明确的 char_interval 以消除 prompt alignment 警告）
     examples = [
         lx.data.ExampleData(
             text="Allergy, the official journal of the European Academy of Allergy and Clinical Immunology (EAACI), aims to advance research.",
@@ -301,6 +301,7 @@ def extract_with_langextract(
                 lx.data.Extraction(
                     extraction_class="host_institution",
                     extraction_text="European Academy of Allergy and Clinical Immunology (EAACI)",
+                    char_interval=lx.data.CharInterval(start_pos=37, end_pos=96),
                     attributes={"type": "host"}
                 )
             ]
@@ -311,11 +312,13 @@ def extract_with_langextract(
                 lx.data.Extraction(
                     extraction_class="host_institution",
                     extraction_text="EAACI and John Wiley and Sons A/S",
+                    char_interval=lx.data.CharInterval(start_pos=2, end_pos=35),
                     attributes={"type": "copyright"}
                 ),
                 lx.data.Extraction(
                     extraction_class="host_institution",
                     extraction_text="John Wiley and Sons, Ltd",
+                    char_interval=lx.data.CharInterval(start_pos=50, end_pos=74),
                     attributes={"type": "publisher"}
                 )
             ]
@@ -326,6 +329,7 @@ def extract_with_langextract(
                 lx.data.Extraction(
                     extraction_class="host_institution",
                     extraction_text="John Wiley & Sons, Inc",
+                    char_interval=lx.data.CharInterval(start_pos=22, end_pos=44),
                     attributes={"type": "copyright"}
                 )
             ]
@@ -436,8 +440,8 @@ def extract_with_langextract(
         return institutions
     
     except Exception as e:
-        print(f"[ERROR] LangExtract failed: {e}", file=sys.stderr)
-        return []
+        # 抛出异常以便上层处理重试逻辑
+        raise
 
 
 # ========== Regexp 规则回退 ==========
@@ -556,6 +560,12 @@ def main():
         "--api-key",
         help="模型 API Key"
     )
+    parser.add_argument(
+        "--extract-method",
+        choices=['langextract', 'regexp', 'auto'],
+        default='auto',
+        help="提取方法：langextract（仅 AI）、regexp（仅规则）、auto（AI 优先，失败回退规则）（默认: auto）"
+    )
     
     args = parser.parse_args()
     
@@ -577,9 +587,24 @@ def main():
     api_key = args.api_key or os.environ.get('OPENAI_API_KEY') or os.environ.get('LANGEXTRACT_API_KEY')
     api_base = args.api_base or os.environ.get('OPENAI_API_BASE')
     
-    # 尝试使用 LangExtract
+    # 根据 extract-method 参数决定提取策略
     institutions = []
-    if LANGEXTRACT_AVAILABLE:
+    actual_method = None  # 实际使用的方法
+    
+    if args.extract_method == 'regexp':
+        # 仅使用 regexp
+        print("[INFO] Using regexp extraction only", file=sys.stderr)
+        institutions = extract_with_regexp(text)
+        actual_method = 'regexp'
+        
+    elif args.extract_method == 'langextract':
+        # 仅使用 langextract
+        if not LANGEXTRACT_AVAILABLE:
+            print("[ERROR] LangExtract not available, cannot use langextract-only mode", file=sys.stderr)
+            result = {"error": "LangExtract not installed"}
+            output_json(result, args.output)
+            sys.exit(1)
+        
         print(f"[INFO] Using LangExtract with model: {args.model_id}", file=sys.stderr)
         institutions = extract_with_langextract(
             text,
@@ -587,18 +612,50 @@ def main():
             api_key=api_key,
             api_base=api_base
         )
+        actual_method = 'langextract'
+        
+    else:  # auto
+        # 优先使用 LangExtract，失败回退到 regexp
+        if LANGEXTRACT_AVAILABLE:
+            print(f"[INFO] Using LangExtract with model: {args.model_id}", file=sys.stderr)
+            try:
+                institutions = extract_with_langextract(
+                    text,
+                    model_id=args.model_id,
+                    api_key=api_key,
+                    api_base=api_base
+                )
+                if institutions:
+                    actual_method = 'langextract'
+            except Exception as e:
+                print(f"[WARNING] LangExtract failed: {e}", file=sys.stderr)
+        
+        # 回退策略
+        if not institutions:
+            print("[INFO] Falling back to regexp extraction", file=sys.stderr)
+            institutions = extract_with_regexp(text)
+            actual_method = 'regexp'
     
-    # 回退策略
-    if not institutions:
-        print("[INFO] LangExtract returned no results, falling back to regexp", file=sys.stderr)
-        institutions = extract_with_regexp(text)
-    
-    # 构建输出
+    # 构建输出（包含元数据）
     if institutions:
-        result = {"host_institutions": institutions}
-        print(f"[OK] Extracted {len(institutions)} institutions using {institutions[0]['extraction_method']}", file=sys.stderr)
+        result = {
+            "extraction_metadata": {
+                "method": actual_method,
+                "model": args.model_id if actual_method == 'langextract' else None,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            },
+            "host_institutions": institutions
+        }
+        print(f"[OK] Extracted {len(institutions)} institutions using {actual_method}", file=sys.stderr)
     else:
-        result = {"host_institutions": []}
+        result = {
+            "extraction_metadata": {
+                "method": actual_method or 'none',
+                "model": args.model_id if actual_method == 'langextract' else None,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            },
+            "host_institutions": []
+        }
         print("[WARNING] No institutions extracted", file=sys.stderr)
     
     # 输出结果

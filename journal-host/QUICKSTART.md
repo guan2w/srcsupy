@@ -98,12 +98,28 @@ URL 列:        D,F
 export OPENAI_API_KEY="sk-xxx"
 export OPENAI_API_BASE="https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-# 批量提取
+# 批量提取（默认 auto 模式）
 python batch_extract.py \
   --url-excel journals.xlsx \
   --name-column A \
   --url-columns D,F \
   --rows 4+
+
+# 或指定提取方法
+python batch_extract.py \
+  --url-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+ \
+  --extract-method langextract
+
+# 强制重新提取
+python batch_extract.py \
+  --url-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+ \
+  --force
 ```
 
 **参数说明：**
@@ -111,6 +127,11 @@ python batch_extract.py \
 - `--name-column`: 期刊名称列（如 A 列）
 - `--url-columns`: URL 列（多列用逗号分隔，如 D,F）
 - `--rows`: 行范围（如 "4+" 或 "4-99"）
+- `--extract-method`: （可选）提取方法
+  - `auto` - 优先 AI，失败回退规则（默认）
+  - `langextract` - 仅使用 AI
+  - `regexp` - 仅使用规则
+- `--force`: （可选）强制重新提取（忽略已存在的结果）
 - `--parallel`: （可选）并行数量
 - `--model-id`: （可选）指定模型
 - `--api-base`: （可选）API 接口地址
@@ -118,7 +139,9 @@ python batch_extract.py \
 
 **输出：**
 - Markdown 文件：`ab/cd/abcdef.../dom.md`
-- 提取结果：`ab/cd/abcdef.../host.json`
+- 提取结果：
+  - `ab/cd/abcdef.../host-langextract.json`（langextract 方法）
+  - `ab/cd/abcdef.../host-regexp.json`（regexp 方法）
 - 日志文件：`journals-snapshot/extract-log.csv`
 
 ### Step 3: 数据整合（生成最终报告）
@@ -220,14 +243,23 @@ grep -r "John Wiley" journals-snapshot/ --include="*.json"
 - `rate_limit`: API 频率限制，降低 `extract.parallel` 或增加 `retry_delay`
 - `api_error`: 检查 API 密钥和配置
 - `conversion_error`: HTML 文件可能损坏
+- `config_error`: LangExtract 不可用或 API 密钥未配置
+
+**提取方法选择建议：**
+- 使用 `--extract-method auto`（默认）：AI 优先，失败自动回退规则
+- 使用 `--extract-method langextract`：仅 AI，质量更高但可能失败
+- 使用 `--extract-method regexp`：仅规则，稳定但精度较低
 
 ### Q3: 如何断点续传？
 
 批量处理工具自动支持断点续传：
 - 快照工具会检查 `snapshot-log.csv`，跳过已成功的 URL
-- 提取工具会检查 `host.json` 是否存在，跳过已提取的文件
+- 提取工具会根据 `--extract-method` 检查对应文件：
+  - `langextract` 模式检查 `host-langextract.json`
+  - `regexp` 模式检查 `host-regexp.json`
+  - `auto` 模式检查两个文件，任意存在则跳过
 
-只需重新运行相同的命令即可。
+只需重新运行相同的命令即可。使用 `--force` 可强制重新提取。
 
 ### Q4: 如何调整并行数量？
 
@@ -263,7 +295,8 @@ journals-snapshot/               # 快照目录
 │           ├── dom.html         # 页面 DOM 快照
 │           ├── page.mhtml       # 完整页面归档
 │           ├── dom.md           # Markdown 转换结果
-│           └── host.json        # 提取的主办单位信息
+│           ├── host-langextract.json  # AI 提取结果
+│           └── host-regexp.json       # 规则提取结果
 └── ...
 ```
 

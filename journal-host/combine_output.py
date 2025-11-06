@@ -233,24 +233,34 @@ def get_hash_path(snapshot_dir: Path, url_hash: str) -> Path:
 
 def load_host_json(snapshot_dir: Path, url_hash: str) -> Optional[Dict[str, Any]]:
     """
-    加载 host.json 文件
+    加载 host.json 文件（支持新旧格式）
+    
+    优先级：
+    1. host-langextract.json（langextract 方法结果）
+    2. host-regexp.json（regexp 方法结果）
     
     Returns:
         host_institutions 列表，如果不存在返回 None
     """
     hash_path = get_hash_path(snapshot_dir, url_hash)
-    json_file = hash_path / "host.json"
     
-    if not json_file.exists():
-        return None
+    # 按优先级尝试读取
+    json_files = [
+        hash_path / "host-langextract.json",
+        hash_path / "host-regexp.json",
+    ]
     
-    try:
-        with open(json_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data.get('host_institutions', [])
-    except Exception as e:
-        print(f"[WARNING] Failed to load {json_file}: {e}", file=sys.stderr)
-        return None
+    for json_file in json_files:
+        if json_file.exists():
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return data.get('host_institutions', [])
+            except Exception as e:
+                print(f"[WARNING] Failed to load {json_file}: {e}", file=sys.stderr)
+                continue
+    
+    return None
 
 
 # ========== 数据整合 ==========
