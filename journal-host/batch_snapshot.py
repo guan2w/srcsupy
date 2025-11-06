@@ -15,7 +15,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     import pandas as pd
@@ -86,83 +86,113 @@ def excel_col_to_num(col: str) -> int:
     return num - 1
 
 
-def parse_excel_range(range_str: str) -> Tuple[str, int, int]:
+def parse_rows_range(rows_str: str) -> Tuple[int, Optional[int]]:
     """
-    解析 Excel 范围字符串
-    例如: "D4:D99" -> ("D", 4, 99)
+    解析行范围字符串
+    
+    Args:
+        rows_str: 行范围，如 "4+" 或 "4-99"
+    
+    Returns:
+        (start_row, end_row)
+        - "4+" -> (4, None) 表示从第4行开始，直到空行
+        - "4-99" -> (4, 99) 表示第4行到第99行
     """
-    match = re.match(r'([A-Z]+)(\d+):([A-Z]+)(\d+)', range_str.strip())
-    if not match:
-        raise ValueError(f"Invalid range format: {range_str}")
+    rows_str = rows_str.strip()
     
-    col_start, row_start, col_end, row_end = match.groups()
+    # 处理 "4+" 格式
+    if rows_str.endswith('+'):
+        start_row = int(rows_str[:-1])
+        return start_row, None
     
-    if col_start != col_end:
-        raise ValueError(f"Range must be single column: {range_str}")
+    # 处理 "4-99" 格式
+    match = re.match(r'(\d+)-(\d+)', rows_str)
+    if match:
+        start_row = int(match.group(1))
+        end_row = int(match.group(2))
+        return start_row, end_row
     
-    return col_start, int(row_start), int(row_end)
+    raise ValueError(f"Invalid rows format: {rows_str}. Use '4+' or '4-99'")
 
 
-def read_urls_from_excel(file_path: str, range_strings: str, sheet_name=0) -> List[str]:
+def read_urls_from_excel(
+    file_path: Path,
+    sheet_name: Any,
+    name_column: str,
+    url_columns: List[str],
+    start_row: int,
+    end_row: Optional[int]
+) -> Tuple[List[str], int]:
     """
     从 Excel 文件读取 URL 列表
     
-    Args:
-        file_path: Excel 文件路径
-        range_strings: 范围字符串，如 "D4:D99,F4:F99"
-        sheet_name: Sheet 名称或索引（默认 0，即第一个 sheet）
-    
     Returns:
-        去重后的 URL 列表
+        (urls, actual_end_row)
     """
-    all_urls = []
-    
-    for range_str in range_strings.split(','):
-        range_str = range_str.strip()
+    # 读取 Excel
+    try:
+        # 确定读取范围
+        skiprows = start_row - 1
         
-        try:
-            col, row_start, row_end = parse_excel_range(range_str)
-            col_idx = excel_col_to_num(col)  # 将列名转换为索引
-            
-            # 读取 Excel
-            df = pd.read_excel(
-                file_path,
-                sheet_name=sheet_name,
-                usecols=[col_idx],
-                skiprows=row_start - 1,
-                nrows=row_end - row_start + 1,
-                header=None,
-                engine='openpyxl'
-            )
-            
-            # 提取 URL
-            urls = df.iloc[:, 0].tolist()
-            urls = [str(u).strip() for u in urls if pd.notna(u)]
-            all_urls.extend(urls)
-            
-        except Exception as e:
-            print(f"[WARNING] Failed to read range {range_str}: {e}", file=sys.stderr)
+        if end_row is not None:
+            nrows = end_row - start_row + 1
+        else:
+            nrows = None  # 读取到最后
+        
+        # 读取所有相关列
+        name_col_idx = excel_col_to_num(name_column)
+        url_col_indices = [excel_col_to_num(col) for col in url_columns]
+        all_col_indices = [name_col_idx] + url_col_indices
+        
+        df = pd.read_excel(
+            file_path,
+            sheet_name=sheet_name,
+            usecols=all_col_indices,
+            skiprows=skiprows,
+            nrows=nrows,
+            header=None,
+            engine='openpyxl'
+        )
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to read Excel: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # 处理数据
+    all_urls = []
+    actual_end_row = start_row - 1
+    
+    for idx, row in df.iterrows():
+        name = row[name_col_idx]
+        
+        # 如果是 "4+" 格式，遇到空行停止
+        if end_row is None and pd.isna(name):
+            break
+        
+        # 跳过空行
+        if pd.isna(name):
             continue
-    
-    # 过滤和去重
-    valid_urls = []
-    exclude_keywords = ['未找到', '未披露']
-    
-    for url in all_urls:
-        if url.startswith('http://') or url.startswith('https://'):
-            valid_urls.append(url)
-        elif url not in exclude_keywords:
-            print(f"[SKIP] 非 http 开头: {url}")
+        
+        actual_end_row = start_row + idx
+        
+        # 提取所有 URL
+        for col_idx in url_col_indices:
+            url = row[col_idx]
+            if pd.notna(url):
+                url_str = str(url).strip()
+                # 过滤无效 URL
+                if url_str.startswith('http://') or url_str.startswith('https://'):
+                    all_urls.append(url_str)
     
     # 去重并保持顺序
     seen = set()
     unique_urls = []
-    for url in valid_urls:
+    for url in all_urls:
         if url not in seen:
             seen.add(url)
             unique_urls.append(url)
     
-    return unique_urls
+    return unique_urls, actual_end_row
 
 
 # ========== 日志管理 ==========
@@ -357,8 +387,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python batch_snapshot.py --url-excel journals.xlsx --url-ranges D4:D99,F4:F99
-  python batch_snapshot.py --url-excel journals.xlsx --url-ranges D4:D99 --parallel 5
+  python batch_snapshot.py \\
+    --url-excel journals.xlsx \\
+    --name-column A \\
+    --url-columns D,F \\
+    --rows 4+
+
+  python batch_snapshot.py \\
+    --url-excel journals.xlsx \\
+    --name-column A \\
+    --url-columns D \\
+    --rows 4-99 \\
+    --parallel 5
         """
     )
     
@@ -368,20 +408,30 @@ def main():
         help='Excel 文件路径'
     )
     parser.add_argument(
-        '--url-ranges',
+        '--sheet-name',
+        default=0,
+        help='Sheet 名称或索引（默认 0，即第一个 sheet）'
+    )
+    parser.add_argument(
+        '--name-column',
         required=True,
-        help='URL 单元格范围，多个范围用逗号分隔，如: D4:D99,F4:F99'
+        help='期刊名称列，如 "A"'
+    )
+    parser.add_argument(
+        '--url-columns',
+        required=True,
+        help='URL 列（多列用逗号分隔），如 "D,F"'
+    )
+    parser.add_argument(
+        '--rows',
+        required=True,
+        help='行范围，如 "4+" 或 "4-99"'
     )
     parser.add_argument(
         '--parallel',
         type=int,
         default=None,
         help='并行数量（覆盖配置文件）'
-    )
-    parser.add_argument(
-        '--sheet-name',
-        default=0,
-        help='Excel Sheet 名称或索引（默认 0，即第一个 sheet）'
     )
     
     args = parser.parse_args()
@@ -390,13 +440,34 @@ def main():
     config = load_config("config.toml")
     parallel = args.parallel if args.parallel is not None else config.get('parallel', 1)
     
+    # 解析参数
+    try:
+        # 处理 sheet_name（可能是数字或字符串）
+        sheet_name = args.sheet_name
+        try:
+            sheet_name = int(sheet_name)
+        except (ValueError, TypeError):
+            pass
+        
+        # 解析 URL 列
+        url_columns = [col.strip() for col in args.url_columns.split(',')]
+        
+        # 解析行范围
+        start_row, end_row = parse_rows_range(args.rows)
+        
+    except Exception as e:
+        print(f"[ERROR] Invalid arguments: {e}", file=sys.stderr)
+        sys.exit(1)
+    
     # 打印关键参数（排错用）
     print("=" * 60)
     print("[CONFIG] 批量快照下载工具 - 启动参数")
     print("=" * 60)
     print(f"Excel 文件:    {args.url_excel}")
     print(f"Sheet 名称:    {args.sheet_name}")
-    print(f"URL 范围:      {args.url_ranges}")
+    print(f"期刊名称列:    {args.name_column}")
+    print(f"URL 列:        {args.url_columns}")
+    print(f"行范围:        {args.rows}")
     print(f"并行数量:      {parallel}")
     print(f"无头模式:      {config.get('headless', True)}")
     print(f"代理设置:      {config.get('proxy', 'none')}")
@@ -415,14 +486,19 @@ def main():
     print(f"[SNAPSHOT] 读取 Excel 文件...")
     
     try:
-        # 尝试转换 sheet_name 为整数（如果是数字字符串）
-        sheet_name = args.sheet_name
-        try:
-            sheet_name = int(sheet_name)
-        except (ValueError, TypeError):
-            pass  # 保持为字符串（sheet 名称）
+        urls, actual_end_row = read_urls_from_excel(
+            excel_path,
+            sheet_name,
+            args.name_column,
+            url_columns,
+            start_row,
+            end_row
+        )
         
-        urls = read_urls_from_excel(str(excel_path), args.url_ranges, sheet_name)
+        # 打印实际读取范围
+        if end_row is None:
+            print(f"[INFO] 实际读取行范围: {start_row}-{actual_end_row}")
+        
     except Exception as e:
         print(f"[ERROR] Failed to read Excel: {e}", file=sys.stderr)
         sys.exit(1)
@@ -436,6 +512,8 @@ def main():
     # 创建快照目录
     snapshot_dir = excel_path.parent / f"{excel_path.stem}-snapshot"
     snapshot_dir.mkdir(exist_ok=True)
+    
+    print(f"[INFO] 快照目录: {snapshot_dir}")
     
     # 初始化日志
     log_file = snapshot_dir / "snapshot-log.csv"
@@ -520,4 +598,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

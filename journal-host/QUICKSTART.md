@@ -46,17 +46,23 @@ watch_interval = 30           # watch 模式扫描间隔（秒）
 
 ### Step 1: 批量下载快照
 
-准备一个 Excel 文件（如 `journals.xlsx`），包含期刊网站的 URL。
+准备一个 Excel 文件（如 `journals.xlsx`），包含期刊名称和网站 URL。
 
 ```bash
 python batch_snapshot.py \
   --url-excel journals.xlsx \
-  --url-ranges D4:D99,F4:F99
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
 ```
 
 **参数说明：**
 - `--url-excel`: Excel 文件路径
-- `--url-ranges`: URL 所在的单元格范围（支持多个范围，逗号分隔）
+- `--name-column`: 期刊名称所在列（如 A 列）
+- `--url-columns`: URL 所在列（多列用逗号分隔，如 D,F）
+- `--rows`: 行范围
+  - `4+`: 从第 4 行开始，遇到空行停止
+  - `4-99`: 读取第 4 到 99 行
 - `--sheet-name`: （可选）Sheet 名称或索引，默认 0（第一个 sheet）
 - `--parallel`: （可选）并行数量，覆盖配置文件
 
@@ -67,7 +73,9 @@ python batch_snapshot.py \
 ============================================================
 Excel 文件:    journals.xlsx
 Sheet 名称:    0
-URL 范围:      D4:D99,F4:F99
+期刊名称列:    A
+URL 列:        D,F
+行范围:        4+
 并行数量:      3
 无头模式:      False
 代理设置:      socks5://172.24.128.1:7890
@@ -90,15 +98,19 @@ URL 范围:      D4:D99,F4:F99
 export OPENAI_API_KEY="sk-xxx"
 export OPENAI_API_BASE="https://dashscope.aliyuncs.com/compatible-mode/v1"
 
-# 从 Excel 文件推导快照目录
-python batch_extract.py --input journals.xlsx
-
-# 或直接指定快照目录
-python batch_extract.py --input journals-snapshot/
+# 批量提取
+python batch_extract.py \
+  --url-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
 ```
 
 **参数说明：**
-- `--input`: Excel 文件路径 或 快照目录路径
+- `--url-excel`: Excel 文件路径
+- `--name-column`: 期刊名称列（如 A 列）
+- `--url-columns`: URL 列（多列用逗号分隔，如 D,F）
+- `--rows`: 行范围（如 "4+" 或 "4-99"）
 - `--parallel`: （可选）并行数量
 - `--model-id`: （可选）指定模型
 - `--api-base`: （可选）API 接口地址
@@ -114,14 +126,14 @@ python batch_extract.py --input journals-snapshot/
 ```bash
 # 整合所有提取结果到 Excel 文件
 python combine_output.py \
-  --input-excel journals.xlsx \
+  --url-excel journals.xlsx \
   --name-column A \
   --url-columns D,F \
   --rows 4+
 ```
 
 **参数说明：**
-- `--input-excel`: 原始 Excel 文件
+- `--url-excel`: Excel 文件路径
 - `--name-column`: 期刊名称所在列（如 A 列）
 - `--url-columns`: URL 所在列（多列用逗号分隔，如 D,F）
 - `--rows`: 行范围
@@ -133,24 +145,6 @@ python combine_output.py \
 - 包含 7 列：期刊名称、来源链接、匹配机构、匹配关键词、匹配句子、提取方法、链接hash
 - 包含所有记录（成功和失败），失败记录通过状态标注
 
-### Step 4: 持续监听模式（可选）
-
-如果您希望在快照下载的同时进行提取，可以使用监听模式：
-
-```bash
-# 在一个终端运行快照下载
-python batch_snapshot.py \
-  --url-excel journals.xlsx \
-  --url-ranges D4:D99,F4:F99
-
-# 在另一个终端运行持续提取
-python batch_extract.py \
-  --input journals-snapshot/ \
-  --watch
-
-# 监听模式会每 30 秒扫描一次新文件并自动提取
-# 按 Ctrl+C 停止监听
-```
 
 ---
 

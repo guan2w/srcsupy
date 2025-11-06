@@ -2,20 +2,30 @@
 """
 批量信息提取工具 - batch_extract.py
 
-从快照目录批量提取期刊主办单位信息
-支持并行处理、失败重试、持续监听模式
+从 Excel 文件读取URL列表，批量提取期刊主办单位信息
+支持并行处理、失败重试、断点续传
 """
 
 import argparse
 import csv
+import hashlib
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+    print("[ERROR] pandas not installed. Run: pip install pandas openpyxl", file=sys.stderr)
+    sys.exit(1)
 
 try:
     import tomllib  # Python 3.11+
@@ -68,65 +78,167 @@ def load_config(path: str = "config.toml") -> Dict[str, Any]:
         return {}
 
 
-# ========== 目录扫描 ==========
+# ========== URL 处理 ==========
 
-def find_snapshot_dirs(snapshot_dir: Path) -> List[Path]:
-    """
-    扫描快照目录，找到包含 dom.html 但没有 host.json 的目录
-    
-    Returns:
-        待提取的目录列表
-    """
-    targets = []
-    
-    # 遍历 hash 分层目录结构: ab/cd/abcdef.../
-    for level1 in snapshot_dir.iterdir():
-        if not level1.is_dir() or len(level1.name) != 2:
-            continue
-        
-        for level2 in level1.iterdir():
-            if not level2.is_dir() or len(level2.name) != 2:
-                continue
-            
-            for hash_dir in level2.iterdir():
-                if not hash_dir.is_dir():
-                    continue
-                
-                dom_file = hash_dir / "dom.html"
-                json_file = hash_dir / "host.json"
-                
-                # 如果有 dom.html 但没有 host.json，则需要提取
-                if dom_file.exists() and not json_file.exists():
-                    targets.append(hash_dir)
-    
-    return targets
+def sha1_hex(text: str) -> str:
+    """计算字符串的 SHA1 hash"""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-def get_snapshot_dir(input_path: str) -> Path:
+def excel_col_to_num(col: str) -> int:
     """
-    根据输入确定快照目录
+    将 Excel 列名转换为数字索引（从0开始）
+    例如: A -> 0, B -> 1, ..., Z -> 25, AA -> 26
+    """
+    num = 0
+    for char in col.upper():
+        num = num * 26 + (ord(char) - ord('A') + 1)
+    return num - 1
+
+
+def parse_rows_range(rows_str: str) -> Tuple[int, Optional[int]]:
+    """
+    解析行范围字符串
     
     Args:
-        input_path: Excel 文件路径 或 快照目录路径
+        rows_str: 行范围，如 "4+" 或 "4-99"
     
     Returns:
-        快照目录的 Path 对象
+        (start_row, end_row)
+        - "4+" -> (4, None) 表示从第4行开始，直到空行
+        - "4-99" -> (4, 99) 表示第4行到第99行
     """
-    input_p = Path(input_path)
+    rows_str = rows_str.strip()
     
-    if input_p.is_dir():
-        # 直接是目录
-        return input_p
-    elif input_p.suffix == '.xlsx':
-        # Excel 文件，推导快照目录
-        snapshot_dir = input_p.parent / f"{input_p.stem}-snapshot"
-        if not snapshot_dir.exists():
-            print(f"[ERROR] Snapshot directory not found: {snapshot_dir}", file=sys.stderr)
-            sys.exit(1)
-        return snapshot_dir
-    else:
-        print(f"[ERROR] Invalid input: {input_path}", file=sys.stderr)
+    # 处理 "4+" 格式
+    if rows_str.endswith('+'):
+        start_row = int(rows_str[:-1])
+        return start_row, None
+    
+    # 处理 "4-99" 格式
+    match = re.match(r'(\d+)-(\d+)', rows_str)
+    if match:
+        start_row = int(match.group(1))
+        end_row = int(match.group(2))
+        return start_row, end_row
+    
+    raise ValueError(f"Invalid rows format: {rows_str}. Use '4+' or '4-99'")
+
+
+def read_urls_from_excel(
+    file_path: Path,
+    sheet_name: Any,
+    name_column: str,
+    url_columns: List[str],
+    start_row: int,
+    end_row: Optional[int]
+) -> Tuple[List[str], int]:
+    """
+    从 Excel 文件读取 URL 列表
+    
+    Returns:
+        (urls, actual_end_row)
+    """
+    # 读取 Excel
+    try:
+        # 确定读取范围
+        skiprows = start_row - 1
+        
+        if end_row is not None:
+            nrows = end_row - start_row + 1
+        else:
+            nrows = None  # 读取到最后
+        
+        # 读取所有相关列
+        name_col_idx = excel_col_to_num(name_column)
+        url_col_indices = [excel_col_to_num(col) for col in url_columns]
+        all_col_indices = [name_col_idx] + url_col_indices
+        
+        df = pd.read_excel(
+            file_path,
+            sheet_name=sheet_name,
+            usecols=all_col_indices,
+            skiprows=skiprows,
+            nrows=nrows,
+            header=None,
+            engine='openpyxl'
+        )
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to read Excel: {e}", file=sys.stderr)
         sys.exit(1)
+    
+    # 处理数据
+    all_urls = []
+    actual_end_row = start_row - 1
+    
+    for idx, row in df.iterrows():
+        name = row[name_col_idx]
+        
+        # 如果是 "4+" 格式，遇到空行停止
+        if end_row is None and pd.isna(name):
+            break
+        
+        # 跳过空行
+        if pd.isna(name):
+            continue
+        
+        actual_end_row = start_row + idx
+        
+        # 提取所有 URL
+        for col_idx in url_col_indices:
+            url = row[col_idx]
+            if pd.notna(url):
+                url_str = str(url).strip()
+                # 过滤无效 URL
+                if url_str.startswith('http://') or url_str.startswith('https://'):
+                    all_urls.append(url_str)
+    
+    # 去重并保持顺序
+    seen = set()
+    unique_urls = []
+    for url in all_urls:
+        if url not in seen:
+            seen.add(url)
+            unique_urls.append(url)
+    
+    return unique_urls, actual_end_row
+
+
+# ========== 目录和文件处理 ==========
+
+def get_hash_path(snapshot_dir: Path, url_hash: str) -> Path:
+    """获取 hash 分层目录路径"""
+    return snapshot_dir / url_hash[:2] / url_hash[2:4] / url_hash[4:]
+
+
+def get_url_hash_dirs(snapshot_dir: Path, urls: List[str]) -> List[Tuple[str, Path, str]]:
+    """
+    根据 URL 列表获取对应的 hash 目录
+    
+    Returns:
+        List[(url, hash_dir, status)]
+        status: 'ready' / 'no_snapshot' / 'already_extracted'
+    """
+    url_info = []
+    
+    for url in urls:
+        url_hash = sha1_hex(url)
+        hash_path = get_hash_path(snapshot_dir, url_hash)
+        dom_file = hash_path / "dom.html"
+        json_file = hash_path / "host.json"
+        
+        if not dom_file.exists():
+            # 快照不存在
+            url_info.append((url, hash_path, 'no_snapshot'))
+        elif json_file.exists():
+            # 已提取
+            url_info.append((url, hash_path, 'already_extracted'))
+        else:
+            # 准备提取
+            url_info.append((url, hash_path, 'ready'))
+    
+    return url_info
 
 
 # ========== 日志管理 ==========
@@ -137,7 +249,7 @@ def init_log_file(log_file: Path):
         log_file.parent.mkdir(parents=True, exist_ok=True)
         with open(log_file, 'w', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['hash', 'dom_path', 'snapshot_time', 'extract_time', 
+            writer.writerow(['hash', 'url', 'snapshot_time', 'extract_time', 
                            'status', 'institutions_count', 'error_type', 'error_message'])
 
 
@@ -148,7 +260,7 @@ def log_result(log_file: Path, result: Dict[str, Any]):
             writer = csv.writer(f)
             writer.writerow([
                 result['hash'],
-                result.get('dom_path', ''),
+                result.get('url', ''),
                 result.get('snapshot_time', ''),
                 result.get('extract_time', ''),
                 result['status'],
@@ -158,33 +270,6 @@ def log_result(log_file: Path, result: Dict[str, Any]):
             ])
     except Exception as e:
         print(f"[ERROR] Failed to write log: {e}", file=sys.stderr)
-
-
-def load_completed_hashes(log_file: Path) -> set:
-    """从日志文件加载已完成的 hash"""
-    completed = set()
-    
-    if not log_file.exists():
-        return completed
-    
-    try:
-        with open(log_file, 'r', encoding='utf-8', newline='') as f:
-            reader = csv.reader(f)
-            next(reader, None)  # 跳过表头
-            
-            for row in reader:
-                if len(row) >= 5:
-                    hash_value = row[0]
-                    status = row[4]
-                    
-                    # 只记录成功的
-                    if status == 'success':
-                        completed.add(hash_value)
-    
-    except Exception as e:
-        print(f"[WARNING] Failed to load completed hashes: {e}", file=sys.stderr)
-    
-    return completed
 
 
 # ========== 提取处理 ==========
@@ -281,9 +366,9 @@ def extract_institutions(md_file: Path, json_file: Path, config: Dict[str, Any])
     return result
 
 
-def process_hash_dir(hash_dir: Path, config: Dict[str, Any], retry_times: int = 3, retry_delay: int = 5) -> Dict[str, Any]:
+def process_url(url: str, hash_dir: Path, config: Dict[str, Any], retry_times: int = 3, retry_delay: int = 5) -> Dict[str, Any]:
     """
-    处理单个 hash 目录
+    处理单个 URL 的提取
     
     Returns:
         处理结果字典
@@ -295,7 +380,7 @@ def process_hash_dir(hash_dir: Path, config: Dict[str, Any], retry_times: int = 
     
     result = {
         'hash': hash_name,
-        'dom_path': str(hash_dir.relative_to(hash_dir.parent.parent.parent.parent)),
+        'url': url,
         'extract_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'status': 'failed',
         'institutions_count': 0,
@@ -360,132 +445,57 @@ def process_hash_dir(hash_dir: Path, config: Dict[str, Any], retry_times: int = 
 
 # ========== 主函数 ==========
 
-def process_snapshots(snapshot_dir: Path, config: Dict[str, Any], parallel: int, log_file: Path) -> tuple:
-    """
-    处理快照目录中的所有待提取文件
-    
-    Returns:
-        (success_count, failed_count)
-    """
-    # 扫描待提取目录
-    target_dirs = find_snapshot_dirs(snapshot_dir)
-    
-    if not target_dirs:
-        print("[EXTRACT] 未发现待提取的快照")
-        return 0, 0
-    
-    print(f"[EXTRACT] 扫描到 {len(target_dirs)} 个快照目录")
-    
-    # 加载已完成的 hash
-    completed_hashes = load_completed_hashes(log_file)
-    remaining_dirs = [d for d in target_dirs if d.name not in completed_hashes]
-    
-    if completed_hashes:
-        print(f"[EXTRACT] 跳过 {len(completed_hashes)} 个已完成的快照")
-    
-    if not remaining_dirs:
-        print("[OK] 所有快照已完成提取")
-        return 0, 0
-    
-    print(f"[EXTRACT] 开始处理 {len(remaining_dirs)} 个快照，并行数={parallel}")
-    
-    extract_config = config.get('extract', {})
-    retry_times = extract_config.get('retry_times', 3)
-    retry_delay = extract_config.get('retry_delay', 5)
-    
-    success_count = 0
-    failed_count = 0
-    
-    # 并行处理
-    with ThreadPoolExecutor(max_workers=parallel) as executor:
-        # 提交任务
-        future_to_dir = {
-            executor.submit(process_hash_dir, hash_dir, config, retry_times, retry_delay): hash_dir
-            for hash_dir in remaining_dirs
-        }
-        
-        # 使用进度条
-        if TQDM_AVAILABLE:
-            progress = tqdm(total=len(remaining_dirs), desc="[PROGRESS]", unit="file")
-        
-        # 处理完成的任务
-        for future in as_completed(future_to_dir):
-            hash_dir = future_to_dir[future]
-            
-            try:
-                result = future.result()
-                
-                # 记录日志
-                log_result(log_file, result)
-                
-                # 统计
-                if result['status'] == 'success':
-                    success_count += 1
-                else:
-                    failed_count += 1
-                    print(f"\n[FAILED] {hash_dir.name}: {result.get('error_type', 'unknown')}")
-                
-                # 更新进度
-                if TQDM_AVAILABLE:
-                    progress.update(1)
-            
-            except Exception as e:
-                print(f"\n[ERROR] Exception processing {hash_dir.name}: {e}", file=sys.stderr)
-                failed_count += 1
-                
-                # 记录异常到日志
-                log_result(log_file, {
-                    'hash': hash_dir.name,
-                    'dom_path': str(hash_dir),
-                    'extract_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'status': 'failed',
-                    'error_type': 'unknown',
-                    'error_message': str(e)[:200]
-                })
-                
-                if TQDM_AVAILABLE:
-                    progress.update(1)
-        
-        if TQDM_AVAILABLE:
-            progress.close()
-    
-    return success_count, failed_count
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="批量信息提取工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python batch_extract.py --input journals.xlsx
-  python batch_extract.py --input journals-snapshot/
-  python batch_extract.py --input journals-snapshot/ --parallel 3
-  python batch_extract.py --input journals-snapshot/ --watch
+  python batch_extract.py \\
+    --url-excel journals.xlsx \\
+    --name-column A \\
+    --url-columns D,F \\
+    --rows 4+
+
+  python batch_extract.py \\
+    --url-excel journals.xlsx \\
+    --name-column A \\
+    --url-columns D \\
+    --rows 4-99 \\
+    --parallel 3
         """
     )
     
     parser.add_argument(
-        '--input',
+        '--url-excel',
         required=True,
-        help='Excel 文件路径 或 快照目录路径'
+        help='Excel 文件路径'
+    )
+    parser.add_argument(
+        '--sheet-name',
+        default=0,
+        help='Sheet 名称或索引（默认 0，即第一个 sheet）'
+    )
+    parser.add_argument(
+        '--name-column',
+        required=True,
+        help='期刊名称列，如 "A"'
+    )
+    parser.add_argument(
+        '--url-columns',
+        required=True,
+        help='URL 列（多列用逗号分隔），如 "D,F"'
+    )
+    parser.add_argument(
+        '--rows',
+        required=True,
+        help='行范围，如 "4+" 或 "4-99"'
     )
     parser.add_argument(
         '--parallel',
         type=int,
         default=None,
         help='并行数量（覆盖配置文件）'
-    )
-    parser.add_argument(
-        '--watch',
-        action='store_true',
-        help='持续监听模式（定期扫描新文件）'
-    )
-    parser.add_argument(
-        '--watch-interval',
-        type=int,
-        default=None,
-        help='监听模式扫描间隔（秒）'
     )
     parser.add_argument(
         '--model-id',
@@ -523,68 +533,177 @@ def main():
     config['api'] = api_config
     
     parallel = args.parallel if args.parallel is not None else extract_config.get('parallel', 2)
-    watch_interval = args.watch_interval if args.watch_interval is not None else extract_config.get('watch_interval', 30)
+    retry_times = extract_config.get('retry_times', 3)
+    retry_delay = extract_config.get('retry_delay', 5)
     
-    # 确定快照目录
-    snapshot_dir = get_snapshot_dir(args.input)
+    # 解析参数
+    try:
+        # 处理 sheet_name（可能是数字或字符串）
+        sheet_name = args.sheet_name
+        try:
+            sheet_name = int(sheet_name)
+        except (ValueError, TypeError):
+            pass
+        
+        # 解析 URL 列
+        url_columns = [col.strip() for col in args.url_columns.split(',')]
+        
+        # 解析行范围
+        start_row, end_row = parse_rows_range(args.rows)
+        
+    except Exception as e:
+        print(f"[ERROR] Invalid arguments: {e}", file=sys.stderr)
+        sys.exit(1)
     
     # 打印关键参数（排错用）
     print("=" * 60)
     print("[CONFIG] 批量信息提取工具 - 启动参数")
     print("=" * 60)
-    print(f"输入路径:      {args.input}")
-    print(f"快照目录:      {snapshot_dir}")
+    print(f"Excel 文件:    {args.url_excel}")
+    print(f"Sheet 名称:    {args.sheet_name}")
+    print(f"期刊名称列:    {args.name_column}")
+    print(f"URL 列:        {args.url_columns}")
+    print(f"行范围:        {args.rows}")
     print(f"并行数量:      {parallel}")
     print(f"模型 ID:       {extract_config.get('model_id', 'gpt-4o-mini')}")
     print(f"API Base:      {api_config.get('api_base', 'from env')}")
-    print(f"重试次数:      {extract_config.get('retry_times', 3)}")
-    print(f"重试延迟:      {extract_config.get('retry_delay', 5)} 秒")
-    print(f"监听模式:      {'启用' if args.watch else '禁用'}")
-    if args.watch:
-        print(f"扫描间隔:      {watch_interval} 秒")
+    print(f"重试次数:      {retry_times}")
+    print(f"重试延迟:      {retry_delay} 秒")
     print(f"配置文件:      config.toml")
     print("=" * 60)
     print()
+    
+    # 检查 Excel 文件
+    excel_path = Path(args.url_excel)
+    if not excel_path.exists():
+        print(f"[ERROR] Excel file not found: {excel_path}", file=sys.stderr)
+        sys.exit(1)
+    
+    # 确定快照目录
+    snapshot_dir = excel_path.parent / f"{excel_path.stem}-snapshot"
+    if not snapshot_dir.exists():
+        print(f"[ERROR] Snapshot directory not found: {snapshot_dir}", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"[INFO] 快照目录: {snapshot_dir}")
+    
+    # 读取 URL
+    print(f"[EXTRACT] 读取 Excel 文件...")
+    
+    try:
+        urls, actual_end_row = read_urls_from_excel(
+            excel_path,
+            sheet_name,
+            args.name_column,
+            url_columns,
+            start_row,
+            end_row
+        )
+        
+        # 打印实际读取范围
+        if end_row is None:
+            print(f"[INFO] 实际读取行范围: {start_row}-{actual_end_row}")
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to read Excel: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"[EXTRACT] 读取到 {len(urls)} 个 URL（去重后）")
+    
+    if not urls:
+        print("[WARNING] No URLs found", file=sys.stderr)
+        sys.exit(0)
+    
+    # 获取 URL 对应的 hash 目录和状态
+    print(f"[EXTRACT] 检查快照状态...")
+    url_info = get_url_hash_dirs(snapshot_dir, urls)
+    
+    # 统计各种状态
+    ready_urls = [(url, path) for url, path, status in url_info if status == 'ready']
+    already_extracted = [(url, path) for url, path, status in url_info if status == 'already_extracted']
+    no_snapshot = [(url, path) for url, path, status in url_info if status == 'no_snapshot']
+    
+    print(f"[EXTRACT] 跳过 {len(already_extracted)} 个已提取的 URL")
+    print(f"[EXTRACT] 跳过 {len(no_snapshot)} 个无快照的 URL")
+    
+    if no_snapshot:
+        for url, _ in no_snapshot[:5]:  # 只显示前5个
+            print(f"[WARNING] 无快照: {url}")
+        if len(no_snapshot) > 5:
+            print(f"[WARNING] ... 还有 {len(no_snapshot) - 5} 个无快照的 URL")
+    
+    if not ready_urls:
+        print("[OK] 所有 URL 已完成提取")
+        sys.exit(0)
+    
+    print(f"[EXTRACT] 开始处理 {len(ready_urls)} 个 URL，并行数={parallel}")
     
     # 初始化日志
     log_file = snapshot_dir / "extract-log.csv"
     init_log_file(log_file)
     
-    # 处理模式
-    if args.watch:
-        print(f"[WATCH] 监听模式启动，每 {watch_interval} 秒扫描一次...")
-        print("[WATCH] 按 Ctrl+C 停止监听")
-        print()
-        
-        try:
-            round_count = 0
-            while True:
-                round_count += 1
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[WATCH] [{timestamp}] 第 {round_count} 轮扫描...")
-                
-                success, failed = process_snapshots(snapshot_dir, config, parallel, log_file)
-                
-                if success > 0 or failed > 0:
-                    print(f"[WATCH] 本轮处理完成 - 成功: {success}, 失败: {failed}")
-                else:
-                    print(f"[WATCH] 无新文件，等待中...")
-                
-                print()
-                time.sleep(watch_interval)
-        
-        except KeyboardInterrupt:
-            print("\n[WATCH] 监听已停止")
+    # 并行处理
+    success_count = 0
+    failed_count = 0
     
-    else:
-        # 一次性处理
-        success, failed = process_snapshots(snapshot_dir, config, parallel, log_file)
+    with ThreadPoolExecutor(max_workers=parallel) as executor:
+        # 提交任务
+        future_to_url = {
+            executor.submit(process_url, url, hash_dir, config, retry_times, retry_delay): (url, hash_dir)
+            for url, hash_dir in ready_urls
+        }
         
-        # 输出统计
-        print(f"\n[OK] 提取完成")
-        print(f"     成功: {success}")
-        print(f"     失败: {failed}")
-        print(f"     日志: {log_file}")
+        # 使用进度条
+        if TQDM_AVAILABLE:
+            progress = tqdm(total=len(ready_urls), desc="[PROGRESS]", unit="url")
+        
+        # 处理完成的任务
+        for future in as_completed(future_to_url):
+            url, hash_dir = future_to_url[future]
+            
+            try:
+                result = future.result()
+                
+                # 记录日志
+                log_result(log_file, result)
+                
+                # 统计
+                if result['status'] == 'success':
+                    success_count += 1
+                else:
+                    failed_count += 1
+                    print(f"\n[FAILED] {url}: {result.get('error_type', 'unknown')}")
+                
+                # 更新进度
+                if TQDM_AVAILABLE:
+                    progress.update(1)
+            
+            except Exception as e:
+                print(f"\n[ERROR] Exception processing {url}: {e}", file=sys.stderr)
+                failed_count += 1
+                
+                # 记录异常到日志
+                log_result(log_file, {
+                    'hash': hash_dir.name,
+                    'url': url,
+                    'extract_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'status': 'failed',
+                    'error_type': 'unknown',
+                    'error_message': str(e)[:200]
+                })
+                
+                if TQDM_AVAILABLE:
+                    progress.update(1)
+        
+        if TQDM_AVAILABLE:
+            progress.close()
+    
+    # 输出统计
+    print(f"\n[OK] 提取完成")
+    print(f"     成功: {success_count}")
+    print(f"     失败: {failed_count}")
+    print(f"     跳过: {len(already_extracted) + len(no_snapshot)} (已提取: {len(already_extracted)}, 无快照: {len(no_snapshot)})")
+    print(f"     日志: {log_file}")
 
 
 if __name__ == "__main__":

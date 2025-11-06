@@ -144,9 +144,17 @@ def read_journal_data(
                 if url_str.startswith('http://') or url_str.startswith('https://'):
                     urls.append(url_str)
         
+        # 对 URL 去重（保持顺序）
+        seen_urls = set()
+        unique_urls = []
+        for url in urls:
+            if url not in seen_urls:
+                seen_urls.add(url)
+                unique_urls.append(url)
+        
         journals.append({
             'journal_name': str(name).strip(),
-            'urls': urls
+            'urls': unique_urls
         })
     
     # 打印实际读取范围
@@ -261,6 +269,15 @@ def determine_status(
     """
     url_hash = sha1_hex(url)
     
+    # 优先检查 host.json 是否存在（institutions 不为 None 说明文件存在）
+    if institutions is not None:
+        # host.json 存在，根据内容判断
+        if len(institutions) == 0:
+            return "无匹配"
+        else:
+            return "成功"
+    
+    # host.json 不存在，检查各阶段状态
     # 检查快照状态
     if url_hash not in snapshot_data:
         return "待快照"
@@ -270,7 +287,7 @@ def determine_status(
         error_type = snapshot_data[url_hash].get('error_type', 'unknown')
         return f"快照失败 ({error_type})"
     
-    # 检查提取状态
+    # 快照成功但 host.json 不存在，检查提取状态
     if url_hash not in extract_data:
         return "待提取"
     
@@ -279,11 +296,8 @@ def determine_status(
         error_type = extract_data[url_hash].get('error_type', 'unknown')
         return f"提取失败 ({error_type})"
     
-    # 检查机构数据
-    if institutions is None or len(institutions) == 0:
-        return "无匹配"
-    
-    return "成功"
+    # 提取成功但 host.json 不存在（异常情况）
+    return "数据缺失"
 
 
 def combine_data(
@@ -366,6 +380,8 @@ def combine_data(
 def write_output_excel(output_rows: List[Dict[str, Any]], output_file: Path):
     """将数据写入 Excel 文件"""
     try:
+        from openpyxl.styles import Border, Side
+        
         df = pd.DataFrame(output_rows)
         
         # 确保输出目录存在
@@ -375,8 +391,25 @@ def write_output_excel(output_rows: List[Dict[str, Any]], output_file: Path):
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='提取结果')
             
-            # 调整列宽
+            # 获取工作表
             worksheet = writer.sheets['提取结果']
+            
+            # 冻结表头行（第一行）
+            worksheet.freeze_panes = 'A2'
+            
+            # 去除表头边框
+            no_border = Border(
+                left=Side(style=None),
+                right=Side(style=None),
+                top=Side(style=None),
+                bottom=Side(style=None)
+            )
+            
+            # 遍历表头行（第一行）的所有单元格，去除边框
+            for cell in worksheet[1]:
+                cell.border = no_border
+            
+            # 调整列宽
             for idx, col in enumerate(df.columns, 1):
                 # 根据列内容长度调整宽度
                 if col in ['匹配句子']:
@@ -405,14 +438,14 @@ def main():
         epilog="""
 示例:
   python combine_output.py \\
-    --input-excel journals.xlsx \\
+    --url-excel journals.xlsx \\
     --sheet-name 0 \\
     --name-column A \\
     --url-columns D,F \\
     --rows 4+
 
   python combine_output.py \\
-    --input-excel journals.xlsx \\
+    --url-excel journals.xlsx \\
     --name-column A \\
     --url-columns D \\
     --rows 4-99
@@ -420,9 +453,9 @@ def main():
     )
     
     parser.add_argument(
-        '--input-excel',
+        '--url-excel',
         required=True,
-        help='输入 Excel 文件路径'
+        help='Excel 文件路径'
     )
     parser.add_argument(
         '--sheet-name',
@@ -451,7 +484,7 @@ def main():
     print("=" * 60)
     print("[CONFIG] 数据整合工具 - 启动参数")
     print("=" * 60)
-    print(f"Excel 文件:    {args.input_excel}")
+    print(f"Excel 文件:    {args.url_excel}")
     print(f"Sheet 名称:    {args.sheet_name}")
     print(f"期刊名称列:    {args.name_column}")
     print(f"URL 列:        {args.url_columns}")
@@ -460,7 +493,7 @@ def main():
     print()
     
     # 检查 Excel 文件
-    excel_path = Path(args.input_excel)
+    excel_path = Path(args.url_excel)
     if not excel_path.exists():
         print(f"[ERROR] Excel file not found: {excel_path}", file=sys.stderr)
         sys.exit(1)

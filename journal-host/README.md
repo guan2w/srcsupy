@@ -334,8 +334,10 @@ python extract.py \
 | 参数名 | 必填 | 说明 |
 |--------|------|------|
 | `--url-excel` | ✅ | Excel 文件路径 |
-| `--url-ranges` | ✅ | URL 单元格范围，如 `D4:D99,F4:F99` |
 | `--sheet-name` | ⛔ | Sheet 名称或索引，默认 0（第一个 sheet） |
+| `--name-column` | ✅ | 期刊名称列，如 "A" |
+| `--url-columns` | ✅ | URL 列（多列用逗号分隔），如 "D,F" |
+| `--rows` | ✅ | 行范围，如 "4+" 或 "4-99" |
 | `--parallel` | ⛔ | 并行数量（覆盖配置文件，默认从 config.toml 读取） |
 
 #### 目录结构
@@ -363,33 +365,42 @@ https://fail.com,def456...,0,0,2025-11-05 10:01:00,failed,timeout,Navigation tim
 #### 运行示例
 
 ```bash
-# 基础用法（默认第一个 sheet）
+# 基础用法（自动遍历到空行）
 python batch_snapshot.py \
   --url-excel journals.xlsx \
-  --url-ranges D4:D99,F4:F99
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
 
-# 指定 sheet（按索引）
+# 指定固定行范围
 python batch_snapshot.py \
   --url-excel journals.xlsx \
-  --url-ranges D4:D99,F4:F99 \
-  --sheet-name 1
+  --name-column A \
+  --url-columns D \
+  --rows 4-99
 
-# 指定 sheet（按名称）
+# 指定 sheet 名称
 python batch_snapshot.py \
   --url-excel journals.xlsx \
-  --url-ranges D4:D99 \
-  --sheet-name "期刊列表"
+  --sheet-name "期刊列表" \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
 
 # 指定并行数
 python batch_snapshot.py \
   --url-excel journals.xlsx \
-  --url-ranges D4:D99,F4:F99 \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+ \
   --parallel 5
 
 # 断点续传（自动跳过已成功的 URL）
 python batch_snapshot.py \
   --url-excel journals.xlsx \
-  --url-ranges D4:D99,F4:F99
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
 ```
 
 **启动时会打印关键参数：**
@@ -399,7 +410,9 @@ python batch_snapshot.py \
 ============================================================
 Excel 文件:    journals.xlsx
 Sheet 名称:    0
-URL 范围:      D4:D99,F4:F99
+期刊名称列:    A
+URL 列:        D,F
+行范围:        4+
 并行数量:      3
 无头模式:      False
 代理设置:      socks5://172.24.128.1:7890
@@ -426,10 +439,12 @@ URL 范围:      D4:D99,F4:F99
 
 | 参数名 | 必填 | 说明 |
 |--------|------|------|
-| `--input` | ✅ | Excel 文件路径或快照目录路径 |
+| `--url-excel` | ✅ | Excel 文件路径 |
+| `--sheet-name` | ⛔ | Sheet 名称或索引，默认 0（第一个 sheet） |
+| `--name-column` | ✅ | 期刊名称列，如 "A" |
+| `--url-columns` | ✅ | URL 列（多列用逗号分隔），如 "D,F" |
+| `--rows` | ✅ | 行范围，如 "4+" 或 "4-99" |
 | `--parallel` | ⛔ | 并行数量（覆盖配置文件） |
-| `--watch` | ⛔ | 持续监听模式（定期扫描新文件） |
-| `--watch-interval` | ⛔ | 监听模式扫描间隔（秒），默认 30 |
 | `--model-id` | ⛔ | LangExtract 模型 ID（覆盖配置文件） |
 | `--api-base` | ⛔ | API 接口地址 |
 | `--api-key` | ⛔ | API Key |
@@ -437,36 +452,36 @@ URL 范围:      D4:D99,F4:F99
 #### extract-log.csv 格式
 
 ```csv
-hash,dom_path,snapshot_time,extract_time,status,institutions_count,error_type,error_message
-abc123...,ab/cd/abc123.../dom.html,2025-11-05 10:00:00,2025-11-05 10:05:00,success,3,,
-def456...,de/f4/def456.../dom.html,2025-11-05 10:01:00,2025-11-05 10:06:00,failed,0,api_error,Rate limit exceeded
+hash,url,snapshot_time,extract_time,status,institutions_count,error_type,error_message
+abc123...,https://example.com,2025-11-05 10:00:00,2025-11-05 10:05:00,success,3,,
+def456...,https://fail.com,2025-11-05 10:01:00,2025-11-05 10:06:00,failed,0,api_error,Rate limit exceeded
 ```
 
 #### 运行示例
 
 ```bash
-# 从 Excel 文件推导快照目录
-python batch_extract.py --input journals.xlsx
+# 基础用法（自动遍历到空行）
+python batch_extract.py \
+  --url-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
 
-# 直接指定快照目录
-python batch_extract.py --input journals-snapshot/
+# 指定固定行范围
+python batch_extract.py \
+  --url-excel journals.xlsx \
+  --name-column A \
+  --url-columns D \
+  --rows 4-99
 
 # 指定并行数和模型
 python batch_extract.py \
-  --input journals-snapshot/ \
+  --url-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+ \
   --parallel 3 \
   --model-id qwen3-vl-32b-instruct
-
-# 持续监听模式（每 30 秒扫描一次新文件）
-python batch_extract.py \
-  --input journals-snapshot/ \
-  --watch
-
-# 自定义监听间隔
-python batch_extract.py \
-  --input journals-snapshot/ \
-  --watch \
-  --watch-interval 60
 ```
 
 ---
@@ -527,9 +542,12 @@ watch_interval = 30       # watch 模式扫描间隔（秒）
 # Step 1: 批量下载快照
 python batch_snapshot.py \
   --url-excel journals.xlsx \
-  --url-ranges D4:D99,F4:F99
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
 
 # 输出：
+# [INFO] 实际读取行范围: 4-152
 # [SNAPSHOT] 读取到 150 个 URL（去重后）
 # [SNAPSHOT] 跳过 20 个已完成的 URL
 # [SNAPSHOT] 开始处理 130 个 URL，并行数=3
@@ -539,22 +557,33 @@ python batch_snapshot.py \
 
 # Step 2: 批量提取信息
 python batch_extract.py \
-  --input journals.xlsx \
+  --url-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+ \
   --model-id qwen3-vl-32b-instruct
 
 # 输出：
-# [EXTRACT] 发现 125 个待提取的快照
-# [EXTRACT] 开始提取，并行数=2
-# [PROGRESS] ████████████████████ 100% (125/125)
-# [OK] 成功: 120, 失败: 5
-# [OK] 日志已保存到 journals-snapshot/extract-log.csv
+# [INFO] 实际读取行范围: 4-152
+# [EXTRACT] 读取到 150 个 URL（去重后）
+# [EXTRACT] 跳过 45 个已提取的 URL
+# [EXTRACT] 跳过 3 个无快照的 URL
+# [EXTRACT] 开始处理 102 个 URL，并行数=2
+# [PROGRESS] ████████████████████ 100% (102/102)
+# [OK] 提取完成
+#      成功: 97
+#      失败: 5
+#      跳过: 48 (已提取: 45, 无快照: 3)
+#      日志: journals-snapshot/extract-log.csv
 
-# Step 3: 持续监听新快照（可选）
-python batch_extract.py \
-  --input journals-snapshot/ \
-  --watch
-# [WATCH] 监听模式启动，每 30 秒扫描一次...
-# [WATCH] 发现 3 个新文件，开始提取...
+# Step 3: 数据整合（生成最终报告）
+python combine_output.py \
+  --url-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
+
+# 输出：journals-snapshot/journals.xlsx-output-251106.143022.xlsx
 ```
 
 ---
@@ -630,7 +659,7 @@ journal-host/
 
 | 参数名 | 必填 | 说明 |
 |--------|------|------|
-| `--input-excel` | ✅ | 输入 Excel 文件路径 |
+| `--url-excel` | ✅ | Excel 文件路径 |
 | `--sheet-name` | ⛔ | Sheet 名称或索引，默认 0（第一个 sheet） |
 | `--name-column` | ✅ | 期刊名称列，如 "A" |
 | `--url-columns` | ✅ | URL 列（多列用逗号分隔），如 "D,F" |
@@ -668,14 +697,14 @@ journal-host/
 ```bash
 # 基础用法（自动遍历到空行）
 python combine_output.py \
-  --input-excel journals.xlsx \
+  --url-excel journals.xlsx \
   --name-column A \
   --url-columns D,F \
   --rows 4+
 
 # 指定固定行范围
 python combine_output.py \
-  --input-excel journals.xlsx \
+  --url-excel journals.xlsx \
   --sheet-name 0 \
   --name-column A \
   --url-columns D \
@@ -683,7 +712,7 @@ python combine_output.py \
 
 # 指定 sheet 名称
 python combine_output.py \
-  --input-excel journals.xlsx \
+  --url-excel journals.xlsx \
   --sheet-name "期刊列表" \
   --name-column A \
   --url-columns D,F \
@@ -756,16 +785,21 @@ URL 列:        D,F
 # Step 1: 批量下载快照
 python batch_snapshot.py \
   --url-excel journals.xlsx \
-  --url-ranges D4:D99,F4:F99
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+
 
 # Step 2: 批量提取信息
 python batch_extract.py \
-  --input journals.xlsx \
+  --url-excel journals.xlsx \
+  --name-column A \
+  --url-columns D,F \
+  --rows 4+ \
   --model-id qwen3-vl-32b-instruct
 
 # Step 3: 数据整合（生成最终报告）
 python combine_output.py \
-  --input-excel journals.xlsx \
+  --url-excel journals.xlsx \
   --name-column A \
   --url-columns D,F \
   --rows 4+
