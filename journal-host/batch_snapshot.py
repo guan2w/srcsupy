@@ -75,6 +75,17 @@ def sha1_hex(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def excel_col_to_num(col: str) -> int:
+    """
+    将 Excel 列名转换为数字索引（从0开始）
+    例如: A -> 0, B -> 1, ..., Z -> 25, AA -> 26
+    """
+    num = 0
+    for char in col.upper():
+        num = num * 26 + (ord(char) - ord('A') + 1)
+    return num - 1
+
+
 def parse_excel_range(range_str: str) -> Tuple[str, int, int]:
     """
     解析 Excel 范围字符串
@@ -111,12 +122,13 @@ def read_urls_from_excel(file_path: str, range_strings: str, sheet_name=0) -> Li
         
         try:
             col, row_start, row_end = parse_excel_range(range_str)
+            col_idx = excel_col_to_num(col)  # 将列名转换为索引
             
             # 读取 Excel
             df = pd.read_excel(
                 file_path,
                 sheet_name=sheet_name,
-                usecols=[col],
+                usecols=[col_idx],
                 skiprows=row_start - 1,
                 nrows=row_end - row_start + 1,
                 header=None,
@@ -209,7 +221,7 @@ def get_hash_path(snapshot_dir: Path, url_hash: str) -> Path:
     return snapshot_dir / url_hash[:2] / url_hash[2:4] / url_hash[4:]
 
 
-def snapshot_url(browser, url: str, snapshot_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+def snapshot_url(url: str, snapshot_dir: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     """
     对单个 URL 进行快照
     
@@ -240,10 +252,24 @@ def snapshot_url(browser, url: str, snapshot_dir: Path, config: Dict[str, Any]) 
     # 创建目录
     hash_path.mkdir(parents=True, exist_ok=True)
     
+    playwright = None
+    browser = None
     context = None
     page = None
     
     try:
+        # 为每个任务创建独立的浏览器实例
+        playwright = sync_playwright().start()
+        
+        # 启动浏览器配置
+        launch_opts = {
+            "headless": config.get('headless', True)
+        }
+        if config.get('proxy'):
+            launch_opts['proxy'] = {'server': config['proxy']}
+        
+        browser = playwright.chromium.launch(**launch_opts)
+        
         # 创建浏览器上下文
         context_options = {}
         if config.get('user_agent'):
@@ -307,6 +333,16 @@ def snapshot_url(browser, url: str, snapshot_dir: Path, config: Dict[str, Any]) 
         if context:
             try:
                 context.close()
+            except:
+                pass
+        if browser:
+            try:
+                browser.close()
+            except:
+                pass
+        if playwright:
+            try:
+                playwright.stop()
             except:
                 pass
     
@@ -418,76 +454,62 @@ def main():
     
     print(f"[SNAPSHOT] 开始处理 {len(remaining_urls)} 个 URL，并行数={parallel}")
     
-    # 启动浏览器
+    # 并行处理（每个任务创建独立的浏览器实例）
     success_count = 0
     failed_count = 0
     
-    with sync_playwright() as p:
-        # 启动浏览器配置
-        launch_opts = {
-            "headless": config.get('headless', True)
+    # 并行处理
+    with ThreadPoolExecutor(max_workers=parallel) as executor:
+        # 提交任务
+        future_to_url = {
+            executor.submit(snapshot_url, url, snapshot_dir, config): url
+            for url in remaining_urls
         }
-        if config.get('proxy'):
-            launch_opts['proxy'] = {'server': config['proxy']}
         
-        browser = p.chromium.launch(**launch_opts)
+        # 使用进度条
+        if TQDM_AVAILABLE:
+            progress = tqdm(total=len(remaining_urls), desc="[PROGRESS]", unit="url")
         
-        try:
-            # 并行处理
-            with ThreadPoolExecutor(max_workers=parallel) as executor:
-                # 提交任务
-                future_to_url = {
-                    executor.submit(snapshot_url, browser, url, snapshot_dir, config): url
-                    for url in remaining_urls
-                }
+        # 处理完成的任务
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            
+            try:
+                result = future.result()
                 
-                # 使用进度条
+                # 记录日志
+                log_result(log_file, result)
+                
+                # 统计
+                if result['status'] == 'success':
+                    success_count += 1
+                else:
+                    failed_count += 1
+                    print(f"\n[FAILED] {url}: {result.get('error_type', 'unknown')}")
+                
+                # 更新进度
                 if TQDM_AVAILABLE:
-                    progress = tqdm(total=len(remaining_urls), desc="[PROGRESS]", unit="url")
+                    progress.update(1)
+            
+            except Exception as e:
+                print(f"\n[ERROR] Exception processing {url}: {e}", file=sys.stderr)
+                failed_count += 1
                 
-                # 处理完成的任务
-                for future in as_completed(future_to_url):
-                    url = future_to_url[future]
-                    
-                    try:
-                        result = future.result()
-                        
-                        # 记录日志
-                        log_result(log_file, result)
-                        
-                        # 统计
-                        if result['status'] == 'success':
-                            success_count += 1
-                        else:
-                            failed_count += 1
-                            print(f"\n[FAILED] {url}: {result.get('error_type', 'unknown')}")
-                        
-                        # 更新进度
-                        if TQDM_AVAILABLE:
-                            progress.update(1)
-                    
-                    except Exception as e:
-                        print(f"\n[ERROR] Exception processing {url}: {e}", file=sys.stderr)
-                        failed_count += 1
-                        
-                        # 记录异常到日志
-                        log_result(log_file, {
-                            'url': url,
-                            'hash': sha1_hex(url),
-                            'snapshot_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            'status': 'failed',
-                            'error_type': 'unknown',
-                            'error_message': str(e)[:200]
-                        })
-                        
-                        if TQDM_AVAILABLE:
-                            progress.update(1)
+                # 记录异常到日志
+                log_result(log_file, {
+                    'url': url,
+                    'hash': sha1_hex(url),
+                    'snapshot_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'status': 'failed',
+                    'error_type': 'unknown',
+                    'error_message': str(e)[:200]
+                })
                 
                 if TQDM_AVAILABLE:
-                    progress.close()
+                    progress.update(1)
         
-        finally:
-            browser.close()
+        if TQDM_AVAILABLE:
+            progress.close()
     
     # 输出统计
     print(f"\n[OK] 快照完成")
