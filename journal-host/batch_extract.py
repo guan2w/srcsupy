@@ -685,6 +685,16 @@ def main():
     retry_times = extract_config.get('retry_times', 3)
     retry_delay = extract_config.get('retry_delay', 5)
     
+    # 获取 API Key（优先级：命令行参数 > extract配置 > llm配置 > 环境变量）
+    api_key = (args.api_key or 
+               extract_config.get('api_key') or 
+               llm_config.get('api_key') or 
+               os.environ.get('OPENAI_API_KEY') or 
+               os.environ.get('LANGEXTRACT_API_KEY'))
+    
+    # 格式化 API Key 显示（显示最后 5 位）
+    api_key_display = f"...{api_key[-5:]}" if api_key and len(api_key) > 5 else (api_key if api_key else "未配置")
+    
     # 解析参数
     try:
         # 处理 sheet_name（可能是数字或字符串）
@@ -717,6 +727,7 @@ def main():
     print(f"强制重提取:    {'是' if args.force else '否'}")
     print(f"并行数量:      {parallel}")
     print(f"模型 ID:       {extract_config.get('model_id', 'gpt-4o-mini')}")
+    print(f"API Key:       {api_key_display}")
     print(f"API Base:      {extract_config.get('api_base') or llm_config.get('api_base', 'from env')}")
     print(f"重试次数:      {retry_times}")
     print(f"重试延迟:      {retry_delay} 秒")

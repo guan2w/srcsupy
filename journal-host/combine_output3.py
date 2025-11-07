@@ -65,17 +65,24 @@ def sha1_hex(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-def parse_rows_range(rows_str: str) -> Tuple[int, int]:
+def parse_rows_range(rows_str: str) -> Tuple[int, Optional[int]]:
     """
     解析行范围字符串
     
     Args:
-        rows_str: 行范围，如 "2-99"
+        rows_str: 行范围，如 "2-99" 或 "2+"
     
     Returns:
         (start_row, end_row)
+        - "2+" -> (2, None) 表示从第2行开始，直到空行
+        - "2-99" -> (2, 99) 表示第2行到第99行
     """
     rows_str = rows_str.strip()
+    
+    # 处理 "2+" 格式
+    if rows_str.endswith('+'):
+        start_row = int(rows_str[:-1])
+        return start_row, None
     
     # 处理 "2-99" 格式
     match = re.match(r'(\d+)-(\d+)', rows_str)
@@ -84,7 +91,7 @@ def parse_rows_range(rows_str: str) -> Tuple[int, int]:
         end_row = int(match.group(2))
         return start_row, end_row
     
-    raise ValueError(f"Invalid rows format: {rows_str}. Use '2-99'")
+    raise ValueError(f"Invalid rows format: {rows_str}. Use '2-99' or '2+'")
 
 
 # ========== 数据读取 ==========
@@ -93,7 +100,7 @@ def read_input_excel(
     excel_path: Path,
     sheet_name: Any,
     start_row: int,
-    end_row: int
+    end_row: Optional[int]
 ) -> Tuple[List[str], pd.DataFrame]:
     """
     从 Excel 文件读取原始数据
@@ -114,7 +121,11 @@ def read_input_excel(
         
         # 读取数据（从 start_row 开始）
         skiprows = start_row - 1
-        nrows = end_row - start_row + 1
+        
+        if end_row is not None:
+            nrows = end_row - start_row + 1
+        else:
+            nrows = None  # 读取到最后
         
         df = pd.read_excel(
             excel_path,
@@ -124,6 +135,15 @@ def read_input_excel(
             header=None,
             engine='openpyxl'
         )
+        
+        # 如果是 "2+" 格式，遇到空行停止
+        if end_row is None:
+            # 找到第一个空行（所有列都为空）
+            for i in range(len(df)):
+                if df.iloc[i].isna().all():
+                    # 截取到空行之前
+                    df = df.iloc[:i]
+                    break
         
         # 设置列名为表头
         df.columns = header_names[:len(df.columns)]
@@ -573,6 +593,11 @@ def main():
     --sheet-name 0 \\
     --rows 2-99
 
+  python combine_output3.py \\
+    --input-excel journals.xlsx \\
+    --sheet-name 0 \\
+    --rows 2+
+
 前置要求：
   三种方法必须已执行并生成对应的 log 文件：
   1. {excel_dir}/{excel_stem}-snapshot/extract-log.csv
@@ -594,7 +619,7 @@ def main():
     parser.add_argument(
         '--rows',
         required=True,
-        help='行范围，如 "2-99"（第1行是表头）'
+        help='行范围，如 "2-99" 或 "2+"（从第2行开始到空行结束，第1行是表头）'
     )
     
     args = parser.parse_args()
@@ -695,9 +720,9 @@ def main():
     print(f"[COMBINE] 生成 {len(output_rows)} 行输出")
     print()
     
-    # 生成输出文件名
+    # 生成输出文件名（包含数据行数）
     timestamp = datetime.now().strftime("%y%m%d.%H%M%S")
-    output_filename = f"{excel_path.stem}-compare-output-{timestamp}.xlsx"
+    output_filename = f"{excel_path.stem}-{len(output_rows)}-{timestamp}.xlsx"
     output_file = excel_path.parent / output_filename
     
     # 写入 Excel

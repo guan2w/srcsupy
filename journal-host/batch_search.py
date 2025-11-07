@@ -83,17 +83,24 @@ def excel_col_to_num(col: str) -> int:
     return num - 1
 
 
-def parse_rows_range(rows_str: str) -> Tuple[int, int]:
+def parse_rows_range(rows_str: str) -> Tuple[int, Optional[int]]:
     """
     解析行范围字符串
     
     Args:
-        rows_str: 行范围，如 "3-99"
+        rows_str: 行范围，如 "3-99" 或 "2+"
     
     Returns:
         (start_row, end_row)
+        - "2+" -> (2, None) 表示从第2行开始，直到空行
+        - "3-99" -> (3, 99) 表示第3行到第99行
     """
     rows_str = rows_str.strip()
+    
+    # 处理 "2+" 格式
+    if rows_str.endswith('+'):
+        start_row = int(rows_str[:-1])
+        return start_row, None
     
     # 处理 "3-99" 格式
     match = re.match(r'(\d+)-(\d+)', rows_str)
@@ -102,7 +109,7 @@ def parse_rows_range(rows_str: str) -> Tuple[int, int]:
         end_row = int(match.group(2))
         return start_row, end_row
     
-    raise ValueError(f"Invalid rows format: {rows_str}. Use '3-99'")
+    raise ValueError(f"Invalid rows format: {rows_str}. Use '3-99' or '2+'")
 
 
 def read_journal_names_from_excel(
@@ -110,7 +117,7 @@ def read_journal_names_from_excel(
     sheet_name: Any,
     name_column: str,
     start_row: int,
-    end_row: int
+    end_row: Optional[int]
 ) -> List[str]:
     """
     从 Excel 文件读取期刊名称列表
@@ -122,7 +129,11 @@ def read_journal_names_from_excel(
     try:
         # 确定读取范围
         skiprows = start_row - 1
-        nrows = end_row - start_row + 1
+        
+        if end_row is not None:
+            nrows = end_row - start_row + 1
+        else:
+            nrows = None  # 读取到最后
         
         # 读取名称列
         name_col_idx = excel_col_to_num(name_column)
@@ -146,6 +157,10 @@ def read_journal_names_from_excel(
     
     for idx, row in df.iterrows():
         name = row[name_col_idx]
+        
+        # 如果是 "2+" 格式，遇到空行停止
+        if end_row is None and pd.isna(name):
+            break
         
         # 跳过空行
         if pd.isna(name):
@@ -468,7 +483,7 @@ def main():
   python batch_search.py \\
     --input-excel journals.xlsx \\
     --name-column A \\
-    --rows 3-99 \\
+    --rows 2+ \\
     --parallel 5
         """
     )
@@ -491,7 +506,7 @@ def main():
     parser.add_argument(
         '--rows',
         required=True,
-        help='行范围，如 "3-99"'
+        help='行范围，如 "3-99" 或 "2+"（从第2行开始到空行结束）'
     )
     parser.add_argument(
         '--parallel',
@@ -510,7 +525,8 @@ def main():
     search_config = config.get('llm', {}).get('search', {})
     
     # API 配置（search 可覆盖 llm 通用配置）
-    api_base = search_config.get('api_base') or llm_config.get('api_base', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+    api_key = search_config.get('api_key') or llm_config.get('api_key') or os.environ.get('OPENAI_API_KEY')
+    api_base = search_config.get('api_base') or llm_config.get('api_base', 'https://api.gpt.ge/v1')
     
     # 搜索专用配置
     parallel = args.parallel if args.parallel is not None else search_config.get('parallel', 10)
@@ -520,6 +536,9 @@ def main():
     model_id = search_config.get('model_id', 'qwen-plus')
     price_input = search_config.get('price_per_1m_input_tokens', 2.75)
     price_output = search_config.get('price_per_1m_output_tokens', 22.0)
+    
+    # 格式化 API Key 显示（显示最后 5 位）
+    api_key_display = f"...{api_key[-5:]}" if api_key and len(api_key) > 5 else (api_key if api_key else "未配置")
     
     # 生成日志文件名（带模型名称和时间戳）
     timestamp = datetime.now().strftime("%y%m%d.%H%M%S")
@@ -559,6 +578,7 @@ def main():
     print(f"行范围:            {args.rows}")
     print(f"并行数量:          {parallel}")
     print(f"模型 ID:           {model_id}")
+    print(f"API Key:           {api_key_display}")
     print(f"API Base:          {api_base}")
     print(f"重试次数:          {retry_times}")
     print(f"重试延迟:          {retry_delay} 秒")

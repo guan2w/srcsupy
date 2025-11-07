@@ -83,17 +83,24 @@ def excel_col_to_num(col: str) -> int:
     return num - 1
 
 
-def parse_rows_range(rows_str: str) -> Tuple[int, int]:
+def parse_rows_range(rows_str: str) -> Tuple[int, Optional[int]]:
     """
     解析行范围字符串
     
     Args:
-        rows_str: 行范围，如 "3-99"
+        rows_str: 行范围，如 "3-99" 或 "2+"
     
     Returns:
         (start_row, end_row)
+        - "2+" -> (2, None) 表示从第2行开始，直到空行
+        - "3-99" -> (3, 99) 表示第3行到第99行
     """
     rows_str = rows_str.strip()
+    
+    # 处理 "2+" 格式
+    if rows_str.endswith('+'):
+        start_row = int(rows_str[:-1])
+        return start_row, None
     
     # 处理 "3-99" 格式
     match = re.match(r'(\d+)-(\d+)', rows_str)
@@ -102,7 +109,7 @@ def parse_rows_range(rows_str: str) -> Tuple[int, int]:
         end_row = int(match.group(2))
         return start_row, end_row
     
-    raise ValueError(f"Invalid rows format: {rows_str}. Use '3-99'")
+    raise ValueError(f"Invalid rows format: {rows_str}. Use '3-99' or '2+'")
 
 
 def read_journal_data_from_excel(
@@ -111,7 +118,7 @@ def read_journal_data_from_excel(
     name_column: str,
     url_columns: List[str],
     start_row: int,
-    end_row: int
+    end_row: Optional[int]
 ) -> List[Dict[str, str]]:
     """
     从 Excel 文件读取期刊数据（名称 + 2个URL）
@@ -123,7 +130,11 @@ def read_journal_data_from_excel(
     try:
         # 确定读取范围
         skiprows = start_row - 1
-        nrows = end_row - start_row + 1
+        
+        if end_row is not None:
+            nrows = end_row - start_row + 1
+        else:
+            nrows = None  # 读取到最后
         
         # 读取名称列和 URL 列
         name_col_idx = excel_col_to_num(name_column)
@@ -154,6 +165,10 @@ def read_journal_data_from_excel(
     
     for idx, row in df.iterrows():
         name = row[name_col_idx]
+        
+        # 如果是 "2+" 格式，遇到空行停止
+        if end_row is None and pd.isna(name):
+            break
         
         # 跳过空行
         if pd.isna(name):
@@ -527,7 +542,7 @@ def main():
     --input-excel journals.xlsx \\
     --name-column A \\
     --url-columns D,F \\
-    --rows 3-99 \\
+    --rows 2+ \\
     --parallel 5
         """
     )
@@ -555,7 +570,7 @@ def main():
     parser.add_argument(
         '--rows',
         required=True,
-        help='行范围，如 "3-99"'
+        help='行范围，如 "3-99" 或 "2+"（从第2行开始到空行结束）'
     )
     parser.add_argument(
         '--parallel',
@@ -574,6 +589,7 @@ def main():
     scan_config = config.get('llm', {}).get('scan', {})
     
     # API 配置（scan 可覆盖 llm 通用配置）
+    api_key = scan_config.get('api_key') or llm_config.get('api_key') or os.environ.get('OPENAI_API_KEY')
     api_base = scan_config.get('api_base') or llm_config.get('api_base', 'https://api.openai.com/v1')
     
     # 扫描专用配置
@@ -584,6 +600,9 @@ def main():
     model_id = scan_config.get('model_id', 'gemini-2.5-pro-search')
     price_input = scan_config.get('price_per_1m_input_tokens', 1.0)
     price_output = scan_config.get('price_per_1m_output_tokens', 8.0)
+    
+    # 格式化 API Key 显示（显示最后 5 位）
+    api_key_display = f"...{api_key[-5:]}" if api_key and len(api_key) > 5 else (api_key if api_key else "未配置")
     
     # 生成日志文件名（带模型名称和时间戳）
     timestamp = datetime.now().strftime("%y%m%d.%H%M%S")
@@ -629,6 +648,7 @@ def main():
     print(f"行范围:            {args.rows}")
     print(f"并行数量:          {parallel}")
     print(f"模型 ID:           {model_id}")
+    print(f"API Key:           {api_key_display}")
     print(f"API Base:          {api_base}")
     print(f"重试次数:          {retry_times}")
     print(f"重试延迟:          {retry_delay} 秒")

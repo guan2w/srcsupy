@@ -524,7 +524,7 @@ if __name__ == "__main__":
     journal_name = "Nature"
     model_id = os.environ.get("MODEL_ID", "qwen-plus")
     api_key = os.environ.get("OPENAI_API_KEY", "")
-    api_base = os.environ.get("OPENAI_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    api_base = os.environ.get("OPENAI_API_BASE", "https://api.gpt.ge/v1")
     
     if not api_key:
         print("[ERROR] Please set OPENAI_API_KEY environment variable")
