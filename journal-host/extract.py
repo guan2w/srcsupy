@@ -34,21 +34,36 @@ except ImportError:
 
 # 关键短语列表（用于句子筛选）
 KEY_PHRASES = [
-    "on behalf of", "official journal of", "official publication of",
-    "affiliate", "edited by", "owned", "in association with",
-    "responsible for", "supervised by", "sponsored by", "patronage",
-    "compile", "in partnership with", "in cooperation with",
-    "the backing of", "administrated by", "university press",
-    "funded by", "published by", "publisher",
-    "copyright ©", "©"
+    "administrated",
+    "affiliate",
+    "compile",
+    "copyright ©",
+    "edited",
+    "funded",
+    "in association with",
+    "in cooperation with",
+    "journal of",
+    "on behalf of",
+    "own",
+    "partnership",
+    "patronage",
+    "press",
+    "publication of",
+    "responsible",
+    "societies",
+    "sponsor",
+    "supervise",
+    "the backing of",
+    "©"
 ]
 
 # 机构类型关键词映射
 TYPE_KEYWORDS = {
-    "host": ["official journal of", "official publication of", "on behalf of", 
-             "sponsored by", "patronage", "academy", "society"],
-    "publisher": ["published by", "publisher", "university press"],
-    "copyright": ["copyright ©", "©", "all rights reserved"]
+    "host": ["journal of", "publication of", "on behalf of", 
+             "sponsor", "patronage", "academy", "society", "societies",
+             "supervise", "administrated", "responsible"],
+    "publisher": ["press", "edited", "compile", "partnership"],
+    "copyright": ["copyright ©", "©", "all rights reserved", "own"]
 }
 
 # 机构名称常见后缀（用于正则提取）
@@ -211,8 +226,8 @@ def clean_institution_name(name: str, institution_type: str = "host") -> str:
     # 去除版权相关前缀
     name = re.sub(r'^.*?(?:copyright|©)\s*(?:\d{4}[-–—]\d{4})?\s*', '', name, flags=re.IGNORECASE)
     
-    # 去除 "published by" 等前缀
-    name = re.sub(r'^.*?(?:published by|edited by|official journal of)\s+', '', name, flags=re.IGNORECASE)
+    # 去除关键词前缀
+    name = re.sub(r'^.*?(?:edited by|edited|journal of|publication of|on behalf of|sponsor(?:ed)? by|own(?:ed)? by|administrat(?:ed)? by|publish(?:ed)? by|in (?:association|cooperation|partnership) with|the backing of|supervis(?:ed)? by|responsible for|funded by|compile(?:d)? by)\s+', '', name, flags=re.IGNORECASE)
     
     # 去除年份
     name = re.sub(r'\b\d{4}\b', '', name)
@@ -489,8 +504,8 @@ def extract_with_regexp(text: str) -> List[Dict[str, Any]]:
                     "extraction_method": "regexp"
                 })
         
-        # 模式 2: official journal of / published by
-        official_pattern = r'(?:official (?:journal|publication) of|published by|on behalf of)\s+(?:the\s+)?([A-Z][^.!?;()]{5,100}?)(?:\.|,|\(|$)'
+        # 模式 2: journal of / edited by / on behalf of 等关键词模式
+        official_pattern = r'(?:(?:official\s+)?(?:journal|publication) of|edited by|on behalf of|sponsor(?:ed)? by|administrat(?:ed)? by|publish(?:ed)? by|own(?:ed)? by|in (?:association|cooperation|partnership) with|the backing of|supervis(?:ed)? by|responsible for|funded by|compile(?:d)? by)\s+(?:the\s+)?([A-Z][^.!?;()]{5,100}?)(?:\.|,|\(|$)'
         for match in re.finditer(official_pattern, sentence, re.IGNORECASE):
             name_raw = match.group(1).strip()
             # 只取到第一个括号或"aims to"等结束词
