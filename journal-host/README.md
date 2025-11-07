@@ -260,19 +260,60 @@ journal-host/
 ├── batch_snapshot.py       # 批量快照下载
 ├── batch_extract.py        # 批量智能提取
 ├── batch_search.py         # 批量联网搜索
+├── batch_url_scan.py       # 批量 URL 深度扫描
 ├── combine_extracted.py    # 数据整合与报告生成
 ├── llm_call.py             # 通用 LLM 调用模块（JSON 输出）
+├── url_scan.py             # 单个 URL 深度扫描工具
 ├── snapshot.py             # 单页面快照工具
 ├── config.toml             # 多层级配置文件
+├── prompts/                # Prompt 模板目录
+│   ├── search.txt          # 联网搜索 prompt
+│   ├── url_scan.txt        # URL 扫描 prompt
+│   └── README.md           # Prompt 编辑说明
 ├── README.md               # 本文档
 └── requirements.txt        # 依赖包
 ```
 
 ---
 
-## 七、批量处理详细说明
+## 七、Prompt 管理
 
-### 7.1 batch_search.py - 批量联网搜索
+### Prompt 模板目录
+
+所有 LLM Prompt 模板统一存放在 `prompts/` 目录，便于维护和版本管理。
+
+**目录结构：**
+```
+prompts/
+├── search.txt          # 联网搜索 prompt（batch_search.py）
+├── url_scan.txt        # URL 深度扫描 prompt（batch_url_scan.py）
+└── README.md           # 编辑规范说明
+```
+
+**加载机制：**
+- `llm_call.py` 在模块加载时自动从文件读取 Prompt
+- 如果文件不存在或读取失败，会回退到内嵌的默认版本
+- 支持动态修改 Prompt，无需修改代码
+
+**编辑 Prompt：**
+1. 直接编辑 `prompts/` 目录下的 `.txt` 文件
+2. 使用 `{variable_name}` 格式定义变量占位符
+3. 保存后重新运行程序即可生效
+
+**示例：修改搜索 Prompt**
+```bash
+# 编辑文件
+vim prompts/search.txt
+
+# 测试修改后的 Prompt
+python batch_search.py --input-excel test.xlsx --name-column A --rows 3-5
+```
+
+---
+
+## 八、批量处理详细说明
+
+### 8.1 batch_search.py - 批量联网搜索
 
 **功能：** 直接调用联网 LLM 搜索主办单位（无需下载快照）
 
@@ -308,7 +349,7 @@ python batch_search.py \
 
 ---
 
-### 7.2 batch_snapshot.py - 批量快照下载
+### 8.2 batch_snapshot.py - 批量快照下载
 
 **功能：** Playwright 自动化下载网页快照
 
@@ -335,7 +376,7 @@ python batch_snapshot.py \
 
 ---
 
-### 7.3 batch_extract.py - 批量智能提取
+### 8.3 batch_extract.py - 批量智能提取
 
 **功能：** 从快照批量提取主办单位
 
@@ -367,7 +408,7 @@ python batch_extract.py \
 
 ---
 
-### 7.4 combine_extracted.py - 数据整合
+### 8.4 combine_extracted.py - 数据整合
 
 **功能：** 整合所有结果，生成完整 Excel 报告
 
@@ -393,7 +434,7 @@ python combine_extracted.py \
 
 ---
 
-## 八、依赖包
+## 九、依赖包
 
 ```bash
 pip install -r requirements.txt
@@ -411,7 +452,7 @@ playwright install chromium  # 仅 batch_snapshot 需要
 
 ---
 
-## 九、常见问题
+## 十、常见问题
 
 **Q: 如何切换不同的 LLM 模型？**
 A: 编辑 `config.toml` 中的 `model_id`，或使用命令行参数 `--model-id`。
@@ -430,21 +471,23 @@ A: 查看 `batch_search-{model}-{timestamp}.log` 文件，包含完整的请求�
 
 ---
 
-## 十、技术亮点
+## 十一、技术亮点
 
-- **多层级配置系统**：`[llm]` 通用配置 + `[llm.search]`/`[extract]` 专用配置，支持覆盖
+- **多层级配置系统**：`[llm]` 通用配置 + `[llm.search]`/`[llm.scan]`/`[extract]` 专用配置，支持覆盖
+- **Prompt 模板管理**：提取到 `prompts/` 目录，支持独立编辑，自动加载，向后兼容
 - **通用 LLM 调用模块**：`llm_call.py` 支持任意 JSON 格式输出的 LLM 任务
 - **智能回退策略**：AI 提取失败自动切换到规则提取
 - **并行处理优化**：Playwright 共享浏览器实例，ThreadPoolExecutor 多线程
 - **完整追溯性**：保留原句、位置、匹配关键词、提取方法
 - **断点续传**：所有批量工具支持断点续传
-- **成本统计**：Token 使用量和成本实时统计（batch_search）
+- **成本统计**：Token 使用量和成本实时统计（batch_search, batch_url_scan）
 
 ---
 
-## 十一、开发计划
+## 十二、开发计划
 
-- [ ] 新的采集方法：LLM 深度分析（直接分析网页内容）
+- [x] ~~新的采集方法：URL 深度扫描（直接分析指定网页）~~ ✅ 已完成
+- [x] ~~Prompt 模板管理：提取到独立目录便于维护~~ ✅ 已完成
 - [ ] 采集方法评估：汇总多种方法结果，自动对比评估
 - [ ] Web UI：可视化操作界面
 - [ ] 结果去重与合并：智能识别重复机构
@@ -452,5 +495,5 @@ A: 查看 `batch_search-{model}-{timestamp}.log` 文件，包含完整的请求�
 ---
 
 **项目地址：** journal-host/
-**文档版本：** 2025-11-07
+**文档版本：** 2025-11-07 (更新)
 
