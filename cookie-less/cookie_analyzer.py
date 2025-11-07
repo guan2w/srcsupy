@@ -15,32 +15,32 @@ import os
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from urllib.parse import unquote
-from curl_reader import CurlFileReader
+from curl_reader import CurlFileReader, CurlCommand
 
 class CookieAnalyzer:
-    def __init__(self, expected_key: str = "status", delay: float = 0.5, retry_count: int = 3):
+    def __init__(self, command: CurlCommand, delay: float = 0.5, retry_count: int = 3):
         """
         初始化Cookie分析器
         
         Args:
-            expected_key: 期望在响应JSON中存在的键
+            command: 要分析的CurlCommand对象
             delay: 请求间隔时间（秒）
             retry_count: 网络异常重试次数
         """
-        self.expected_key = expected_key
+        self.command = command
         self.delay = delay
         self.retry_count = retry_count
         self.session = requests.Session()
         
-    def parse_curl_command(self, curl_command: str) -> Tuple[str, Dict[str, str], Dict[str, str]]:
+    def parse_curl_command(self, curl_command: str) -> Tuple[str, str, Dict[str, str], Dict[str, str], Optional[str]]:
         """
-        解析curl命令，提取URL、headers和cookies
+        解析curl命令，提取URL、方法、headers、cookies和数据
         
         Args:
             curl_command: curl命令字符串
             
         Returns:
-            (url, headers, cookies)
+            (url, method, headers, cookies, data)
         """
         # 提取URL
         url_match = re.search(r"curl\s+'([^']+)'", curl_command)
@@ -66,7 +66,19 @@ class CookieAnalyzer:
                     key, value = pair.split('=', 1)
                     cookies[key.strip()] = value.strip()
         
-        return url, headers, cookies
+        # 确定方法和提取数据
+        method = 'GET'
+        data = None
+        data_match = re.search(r"--data-raw\s+'([^']+)'", curl_command)
+        if data_match:
+            method = 'POST'
+            data = data_match.group(1)
+            
+        # 检查 -X POST
+        if '-X POST' in curl_command or '-X "POST"' in curl_command:
+            method = 'POST'
+            
+        return url, method, headers, cookies, data
     
     def _is_network_error(self, exception: Exception) -> bool:
         """
@@ -92,14 +104,16 @@ class CookieAnalyzer:
         ]
         return any(error in error_message for error in network_errors)
     
-    def test_request(self, url: str, headers: Dict[str, str], cookies: Dict[str, str], return_data: bool = False) -> Tuple[bool, Optional[Dict], Optional[str]]:
+    def test_request(self, url: str, method: str, headers: Dict[str, str], cookies: Dict[str, str], data: Optional[str], return_data: bool = False) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """
         测试请求是否成功，支持网络异常重试
         
         Args:
             url: 请求URL
+            method: 请求方法 (GET/POST)
             headers: 请求头
             cookies: cookie字典
+            data: POST数据
             return_data: 是否返回响应数据
             
         Returns:
@@ -110,29 +124,60 @@ class CookieAnalyzer:
         
         for attempt in range(self.retry_count + 1):  # 包括第一次尝试
             try:
-                response = self.session.get(url, headers=headers, cookies=cookies, timeout=30)
+                if method == 'POST':
+                    response = self.session.post(url, headers=headers, cookies=cookies, data=data, timeout=30)
+                else:
+                    response = self.session.get(url, headers=headers, cookies=cookies, timeout=30)
                 
                 # 检查状态码
                 if response.status_code != 200:
                     reason = f"HTTP状态码错误: {response.status_code}"
                     return False, None, reason
-                    
-                # 检查响应内容是否为JSON且包含期望的键
-                try:
-                    json_data = response.json()
-                    success = self.expected_key in json_data
-                    if success:
-                        if return_data:
-                            return success, json_data, None
+                
+                # 根据配置验证响应
+                if self.command.expected_json_key is not None:
+                    # 验证JSON响应
+                    try:
+                        json_data = response.json()
+                        # 如果expected_json_key为空字符串，则只检查是否为有效JSON
+                        if self.command.expected_json_key == "":
+                            success = True
                         else:
-                            return success, None, None
-                    else:
-                        reason = f"响应JSON中缺少期望的键: '{self.expected_key}'"
+                            success = self.command.expected_json_key in json_data
+                        
+                        if success:
+                            if return_data:
+                                return True, json_data, None
+                            else:
+                                return True, None, None
+                        else:
+                            reason = f"响应JSON中缺少期望的键: '{self.command.expected_json_key}'"
+                            return False, None, reason
+                    except json.JSONDecodeError:
+                        reason = "响应内容不是有效的JSON格式"
                         return False, None, reason
-                except json.JSONDecodeError:
-                    reason = "响应内容不是有效的JSON格式"
-                    return False, None, reason
-                    
+                
+                elif self.command.expected_keyword_re is not None:
+                    # 验证响应文本中的关键字
+                    try:
+                        content = response.text
+                        if re.search(self.command.expected_keyword_re, content):
+                            if return_data:
+                                # 注意：当使用正则时，返回的数据是文本而非JSON
+                                return True, {"text_content": content}, None
+                            else:
+                                return True, None, None
+                        else:
+                            reason = f"响应文本中未找到匹配 '{self.command.expected_keyword_re}' 的内容"
+                            return False, None, reason
+                    except Exception as e:
+                        reason = f"读取或匹配响应文本时出错: {e}"
+                        return False, None, reason
+                
+                else:
+                    # 如果没有设置验证条件，则HTTP 200即为成功
+                    return True, None, None
+
             except Exception as e:
                 last_exception = e
                 
@@ -154,25 +199,35 @@ class CookieAnalyzer:
         
         return False, None, "未知错误"
     
-    def find_necessary_cookies(self, url: str, headers: Dict[str, str], cookies: Dict[str, str]) -> Dict[str, str]:
+    def find_necessary_cookies(self, url: str, method: str, headers: Dict[str, str], cookies: Dict[str, str], data: Optional[str]) -> Dict[str, str]:
         """
         通过逐项移除的方式找到必要的cookie
         
         Args:
             url: 请求URL
+            method: 请求方法
             headers: 请求头
             cookies: 完整的cookie字典
+            data: POST数据
             
         Returns:
             必要的cookie字典
         """
         print(f"开始分析，共有 {len(cookies)} 个cookie项...")
-        print(f"期望响应包含键: {self.expected_key}")
+        if self.command.expected_json_key is not None:
+            if self.command.expected_json_key:
+                print(f"期望响应为JSON，且包含键: '{self.command.expected_json_key}'")
+            else:
+                print("期望响应为有效的JSON")
+        elif self.command.expected_keyword_re is not None:
+            print(f"期望响应文本匹配正则: '{self.command.expected_keyword_re}'")
+        else:
+            print("期望响应状态码为200")
         print("-" * 50)
         
         # 首先测试完整的cookie是否工作
         print("测试完整cookie...")
-        success, _, reason = self.test_request(url, headers, cookies)
+        success, _, reason = self.test_request(url, method, headers, cookies, data)
         if not success:
             print(f"❌ 完整cookie请求失败！请检查curl命令是否正确")
             print(f"    💡 失败原因: {reason}")
@@ -193,15 +248,20 @@ class CookieAnalyzer:
                 
                 # 测试移除后是否仍然成功
                 time.sleep(self.delay)  # 避免请求过于频繁
-                success, data, reason = self.test_request(url, headers, temp_cookies, True)
+                success, response_data, reason = self.test_request(url, method, headers, temp_cookies, data, True)
                 if success:
                     print(f"  ✅ 可以移除 '{cookie_name}'")
                     necessary_cookies = temp_cookies
                     removed_cookies.append((cookie_name, removed_value))
-                    # 打印指定键的值的前100个字符
-                    if data and self.expected_key in data:
-                        key_value = str(data[self.expected_key])
-                        print(f"    📄 {self.expected_key}: {key_value[:100]}{'...' if len(key_value) > 100 else ''}")
+                    
+                    # 打印验证依据
+                    if response_data:
+                        if self.command.expected_json_key is not None and self.command.expected_json_key in response_data:
+                            key_value = str(response_data[self.command.expected_json_key])
+                            print(f"    📄 {self.command.expected_json_key}: {key_value[:100]}{'...' if len(key_value) > 100 else ''}")
+                        elif "text_content" in response_data:
+                            # 正则匹配成功，不特别显示什么
+                            pass
                 else:
                     print(f"  ❌ 不能移除 '{cookie_name}' - 这是必要的cookie")
                     print(f"    🔍 判断依据: {reason}")
@@ -224,7 +284,7 @@ class CookieAnalyzer:
         
         return necessary_cookies
     
-    def generate_minimal_curl(self, url: str, headers: Dict[str, str], necessary_cookies: Dict[str, str]) -> str:
+    def generate_minimal_curl(self, url: str, headers: Dict[str, str], necessary_cookies: Dict[str, str], data: Optional[str]) -> str:
         """
         生成使用最小必要cookie的curl命令
         
@@ -232,6 +292,7 @@ class CookieAnalyzer:
             url: 请求URL
             headers: 请求头
             necessary_cookies: 必要的cookie字典
+            data: POST数据
             
         Returns:
             最小化的curl命令
@@ -240,6 +301,9 @@ class CookieAnalyzer:
         
         # 添加headers
         for key, value in headers.items():
+            # Cookie头由-b参数处理，不在这里添加
+            if key.lower() == 'cookie':
+                continue
             curl_parts.append(f"  -H '{key}: {value}'")
         
         # 添加必要的cookies
@@ -247,6 +311,12 @@ class CookieAnalyzer:
             cookie_string = '; '.join([f"{k}={v}" for k, v in necessary_cookies.items()])
             curl_parts.append(f"  -b '{cookie_string}'")
         
+        # 添加POST数据
+        if data:
+            # 在shell中，需要对特殊字符进行转义，但curl的--data-raw会处理
+            # 这里的data是直接从原始命令中提取的，所以应该已经是正确的格式
+            curl_parts.append(f"  --data-raw '{data}'")
+            
         return " \\\n".join(curl_parts)
 
 def parse_arguments():
@@ -337,7 +407,13 @@ def main():
         if not args.quiet:
             print(f"从{args.file}读取到 {len(commands)} 个curl命令:")
             for i, cmd in enumerate(commands, 1):
-                print(f"  {i}. {cmd.name} (期望键: {cmd.expected_key})")
+                if cmd.expected_json_key is not None:
+                    validation = f"JSON key: '{cmd.expected_json_key}'" if cmd.expected_json_key else "Valid JSON"
+                elif cmd.expected_keyword_re is not None:
+                    validation = f"Keyword RE: '{cmd.expected_keyword_re}'"
+                else:
+                    validation = "Status 200"
+                print(f"  {i}. {cmd.name} (验证: {validation})")
                 sys.stdout.flush()  # 强制刷新输出缓冲区
             print()  # 添加空行确保输出完整
         
@@ -365,25 +441,28 @@ def main():
             print("-" * 40)
         
         analyzer = CookieAnalyzer(
-            expected_key=selected_cmd.expected_key, 
+            command=selected_cmd,
             delay=args.delay, 
             retry_count=args.retry
         )
         
         # 解析curl命令
-        url, headers, cookies = analyzer.parse_curl_command(selected_cmd.curl_command)
+        url, method, headers, cookies, data = analyzer.parse_curl_command(selected_cmd.curl_command)
         
         if not args.quiet:
             print(f"📍 URL: {url[:60]}{'...' if len(url) > 60 else ''}")
+            print(f"▶️  Method: {method}")
             print(f"📄 Headers: {len(headers)} 个")
             print(f"🍪 Cookies: {len(cookies)} 个")
+            if data:
+                print(f"📦 Data: {len(data)} 字节")
         
         if len(cookies) == 0:
             print("⚠️  该命令没有cookie，无需分析")
             return
         
         # 分析必要的cookie
-        necessary_cookies = analyzer.find_necessary_cookies(url, headers, cookies)
+        necessary_cookies = analyzer.find_necessary_cookies(url, method, headers, cookies, data)
         
         # 生成结果文件
         if necessary_cookies or len(cookies) > 0:
@@ -392,7 +471,7 @@ def main():
                 print("生成最小化curl命令:")
                 print("-" * 60)
             
-            minimal_curl = analyzer.generate_minimal_curl(url, headers, necessary_cookies)
+            minimal_curl = analyzer.generate_minimal_curl(url, headers, necessary_cookies, data)
             if not args.quiet:
                 print(minimal_curl)
             
@@ -419,7 +498,8 @@ def main():
                     "config": {
                         "delay": args.delay,
                         "retry_count": args.retry,
-                        "expected_key": selected_cmd.expected_key
+                        "expected_json_key": selected_cmd.expected_json_key,
+                        "expected_keyword_re": selected_cmd.expected_keyword_re
                     },
                     "original_cookies_count": len(cookies),
                     "necessary_cookies_count": len(necessary_cookies),

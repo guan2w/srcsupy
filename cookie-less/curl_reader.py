@@ -12,21 +12,33 @@ from typing import List, Dict, Optional, Tuple
 class CurlCommand:
     """表示一个curl命令的数据类"""
     
-    def __init__(self, name: str, expected_key: str, curl_command: str):
+    def __init__(self, name: str, curl_command: str, 
+                 expected_json_key: Optional[str] = None, 
+                 expected_keyword_re: Optional[str] = None):
         """
         初始化curl命令对象
         
         Args:
             name: 命令名称
-            expected_key: 期望的JSON键名
             curl_command: curl命令字符串
+            expected_json_key: 期望的JSON键名 (与expected_keyword_re互斥)
+            expected_keyword_re: 期望的关键字正则表达式 (与expected_json_key互斥)
         """
+        if expected_json_key is not None and expected_keyword_re is not None:
+            raise ValueError("expected_json_key 和 expected_keyword_re 不能同时设置")
+            
         self.name = name
-        self.expected_key = expected_key
         self.curl_command = curl_command.strip()
+        self.expected_json_key = expected_json_key
+        self.expected_keyword_re = expected_keyword_re
     
     def __str__(self):
-        return f"CurlCommand(name='{self.name}', expected_key='{self.expected_key}')"
+        parts = [f"name='{self.name}'"]
+        if self.expected_json_key is not None:
+            parts.append(f"expected_json_key='{self.expected_json_key}'")
+        if self.expected_keyword_re is not None:
+            parts.append(f"expected_keyword_re='{self.expected_keyword_re}'")
+        return f"CurlCommand({', '.join(parts)})"
     
     def __repr__(self):
         return self.__str__()
@@ -121,15 +133,18 @@ class CurlFileReader:
             return None
         
         name = ""
-        expected_key = "data"  # 默认值
+        expected_json_key: Optional[str] = None
+        expected_keyword_re: Optional[str] = None
         curl_lines = []
         
         # 解析配置行和curl命令行
         for line in lines:
             if line.startswith('name='):
                 name = line[5:].strip()
-            elif line.startswith('expected_key='):
-                expected_key = line[13:].strip()
+            elif line.startswith('expected_json_key='):
+                expected_json_key = line[20:].strip()
+            elif line.startswith('expected_keyword_re='):
+                expected_keyword_re = line[22:].strip()
             elif line.startswith('curl ') or (curl_lines and line.strip()):
                 # curl命令行或者续行
                 curl_lines.append(line)
@@ -148,7 +163,11 @@ class CurlFileReader:
                 name = "Unnamed Command"
         
         curl_command = ' '.join(curl_lines)
-        return CurlCommand(name, expected_key, curl_command)
+        try:
+            return CurlCommand(name, curl_command, expected_json_key, expected_keyword_re)
+        except ValueError as e:
+            # 包装错误并提供更多上下文
+            raise ValueError(f"命令 '{name}' 的配置无效: {e}")
     
 
 
@@ -162,7 +181,10 @@ def main():
         
         for i, cmd in enumerate(commands, 1):
             print(f"{i}. {cmd.name}")
-            print(f"   期望键名: {cmd.expected_key}")
+            if cmd.expected_json_key is not None:
+                print(f"   期望JSON键名: {cmd.expected_json_key}")
+            if cmd.expected_keyword_re is not None:
+                print(f"   期望关键字正则: {cmd.expected_keyword_re}")
             print(f"   命令长度: {len(cmd.curl_command)} 字符")
             print()
             
