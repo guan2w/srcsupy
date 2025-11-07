@@ -295,30 +295,27 @@ def extract_with_langextract(
     
     # Few-shot 示例（添加明确的 char_interval 以消除 prompt alignment 警告）
     examples = [
-        lx.data.ExampleData(
-            text="Allergy, the official journal of the European Academy of Allergy and Clinical Immunology (EAACI), aims to advance research.",
-            extractions=[
-                lx.data.Extraction(
-                    extraction_class="host_institution",
-                    extraction_text="European Academy of Allergy and Clinical Immunology (EAACI)",
-                    char_interval=lx.data.CharInterval(start_pos=37, end_pos=96),
-                    attributes={"type": "host"}
-                )
-            ]
-        ),
+        # lx.data.ExampleData(
+        #     text="Allergy, the official journal of the European Academy of Allergy and Clinical Immunology (EAACI), aims to advance research.",
+        #     extractions=[
+        #         lx.data.Extraction(
+        #             extraction_class="host_institution",
+        #             extraction_text="European Academy of Allergy and Clinical Immunology (EAACI)",
+        #             attributes={"type": "host"}
+        #         )
+        #     ]
+        # ),
         lx.data.ExampleData(
             text="© EAACI and John Wiley and Sons A/S. Published by John Wiley and Sons, Ltd",
             extractions=[
                 lx.data.Extraction(
                     extraction_class="host_institution",
                     extraction_text="EAACI and John Wiley and Sons A/S",
-                    char_interval=lx.data.CharInterval(start_pos=2, end_pos=35),
                     attributes={"type": "copyright"}
                 ),
                 lx.data.Extraction(
                     extraction_class="host_institution",
                     extraction_text="John Wiley and Sons, Ltd",
-                    char_interval=lx.data.CharInterval(start_pos=50, end_pos=74),
                     attributes={"type": "publisher"}
                 )
             ]
@@ -329,7 +326,26 @@ def extract_with_langextract(
                 lx.data.Extraction(
                     extraction_class="host_institution",
                     extraction_text="John Wiley & Sons, Inc",
-                    char_interval=lx.data.CharInterval(start_pos=22, end_pos=44),
+                    attributes={"type": "copyright"}
+                )
+            ]
+        ),
+        lx.data.ExampleData(
+            text="All content on this site: Copyright © 2025 Elsevier B.V., its licensors, and contributors",
+            extractions=[
+                lx.data.Extraction(
+                    extraction_class="host_institution",
+                    extraction_text="Elsevier B.V.",
+                    attributes={"type": "copyright"}
+                )
+            ]
+        ),
+        lx.data.ExampleData(
+            text="Published by the Vietnam National University, Hanoi, the journal will be produced by Elsevier, home of Materials Today , and hosted on ScienceDirect.",
+            extractions=[
+                lx.data.Extraction(
+                    extraction_class="host_institution",
+                    extraction_text="Vietnam National University",
                     attributes={"type": "copyright"}
                 )
             ]

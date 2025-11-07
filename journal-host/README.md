@@ -332,16 +332,159 @@ python extract.py \
 
 ### 9.1 概述
 
-批量处理工具包含两个独立脚本：
+批量处理工具包含三个独立脚本：
 
 - **batch_snapshot.py**: 批量下载网页快照
-- **batch_extract.py**: 批量提取主办单位信息
+- **batch_extract.py**: 批量提取主办单位信息（从快照中提取）
+- **batch_search.py**: 批量联网搜索主办单位信息（直接调用联网大模型）
 
-两个脚本可独立运行，也可串联使用，支持并行处理、断点续传和进度显示。
+所有脚本均支持并行处理、断点续传和进度显示。
 
 ---
 
-### 9.2 batch_snapshot.py - 批量快照工具
+### 9.2 batch_search.py - 批量联网搜索工具
+
+#### 功能特点
+
+- ✅ 从 Excel 文件读取期刊名称
+- ✅ 调用支持联网搜索的大模型（如 qwen-plus）
+- ✅ 自动解析 JSON 数组返回结果
+- ✅ 并行处理（可配置并发量）
+- ✅ 失败重试机制（可配置次数和延迟）
+- ✅ 断点续传（跳过已成功处理的期刊）
+- ✅ 完整的 LLM 交互日志（输入输出）
+- ✅ Token 使用量和成本统计
+- ✅ 详细的进度和错误日志
+
+#### CLI 参数
+
+| 参数名 | 必填 | 说明 |
+|--------|------|------|
+| `--input-excel` | ✅ | Excel 文件路径 |
+| `--sheet-name` | ⛔ | Sheet 名称或索引，默认 0（第一个 sheet） |
+| `--name-column` | ✅ | 期刊名称列，如 "A" |
+| `--rows` | ✅ | 行范围，如 "3-99" |
+| `--parallel` | ⛔ | 并行数量（覆盖配置文件，默认从 config.toml 读取） |
+
+#### 输出文件
+
+**Excel 输出** - `{input-excel}-output-{model_id}-YYMMDD.hhmmss.xlsx`
+
+包含 8 列：
+- 期刊名称
+- 主办单位
+- 关键句子
+- 判断依据
+- 来源链接
+- 状态 (success/failed)
+- 错误信息
+- 处理时间
+
+**日志文件** - `batch_search-{model_id}-YYMMDD.hhmmss.log`
+
+包含所有 LLM 交互的完整输入输出
+
+**断点续传日志** - `{input-excel}-search-log.csv`
+
+记录每条处理状态，支持断点续传
+
+#### 配置文件
+
+在 `config.toml` 的 `[api]` 块配置：
+
+```toml
+[api]
+api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "sk-xxx"
+search_model_id = "qwen-plus"            # 联网搜索模型
+search_parallel = 10                     # 并发请求量
+search_retry_times = 3                   # 失败重试次数
+search_retry_delay = 5                   # 重试延迟（秒）
+search_timeout = 120                     # 单次请求超时（秒）
+price_per_1m_input_tokens = 2.75         # 输入 token 单价（美元/百万tokens）
+price_per_1m_output_tokens = 22.0        # 输出 token 单价（美元/百万tokens）
+```
+
+#### 运行示例
+
+```bash
+# 基础用法
+python batch_search.py \
+  --input-excel journals.xlsx \
+  --name-column A \
+  --rows 3-99
+
+# 自定义并发量
+python batch_search.py \
+  --input-excel journals.xlsx \
+  --name-column A \
+  --rows 3-99 \
+  --parallel 5
+
+# 指定 sheet 名称
+python batch_search.py \
+  --input-excel journals.xlsx \
+  --sheet-name "期刊列表" \
+  --name-column A \
+  --rows 3-99
+```
+
+**启动时会打印关键参数：**
+```
+============================================================
+[CONFIG] 批量联网搜索工具 - 启动参数
+============================================================
+Excel 文件:        journals.xlsx
+Sheet 名称:        0
+期刊名称列:        A
+行范围:            3-99
+并行数量:          10
+模型 ID:           qwen-plus
+API Base:          https://dashscope.aliyuncs.com/compatible-mode/v1
+重试次数:          3
+重试延迟:          5 秒
+请求超时:          120 秒
+Token 价格:        输入 $2.75/1M, 输出 $22.0/1M
+日志文件:          batch_search-qwen-plus-251107.153022.log
+配置文件:          config.toml
+============================================================
+```
+
+**处理过程会实时输出：**
+```
+[SEARCH] 处理期刊: Nature
+[SUCCESS] Nature: 提取 2 条结果, tokens: 320, 成本: $0.0076
+
+[PROGRESS] ████████████ 50% (50/100) 成功:48 失败:2
+
+...
+
+[OK] 全部完成
+     成功: 95
+     失败: 5
+     总 tokens: 输入 15,234, 输出 28,456, 总计 43,690
+     总成本: $6.89
+     输出文件: journals.xlsx-output-qwen-plus-251107.153022.xlsx
+     日志文件: batch_search-qwen-plus-251107.153022.log
+     续传日志: journals.xlsx-search-log.csv
+```
+
+#### 断点续传
+
+重新运行相同命令时，会自动跳过已成功的期刊：
+
+```bash
+# 第一次运行（处理了 50 个）
+python batch_search.py --input-excel journals.xlsx --name-column A --rows 3-99
+
+# 中断后再次运行（自动跳过前 50 个）
+python batch_search.py --input-excel journals.xlsx --name-column A --rows 3-99
+# 输出：[SEARCH] 跳过 50 个已处理的期刊
+```
+
+---
+
+### 9.3 batch_snapshot.py - 批量快照工具
 
 #### 功能特点
 
@@ -448,7 +591,7 @@ URL 列:        D,F
 
 ---
 
-### 9.3 batch_extract.py - 批量提取工具
+### 9.4 batch_extract.py - 批量提取工具
 
 #### 功能特点
 
@@ -513,7 +656,7 @@ python batch_extract.py \
 
 ---
 
-### 9.4 配置文件（config.toml）
+### 9.5 配置文件（config.toml）
 
 批量处理工具的配置从 `config.toml` 读取，命令行参数优先级更高。
 
@@ -540,7 +683,7 @@ watch_interval = 30       # watch 模式扫描间隔（秒）
 
 ---
 
-### 9.5 并行处理技术方案
+### 9.6 并行处理技术方案
 
 #### Snapshot 并行策略
 
@@ -563,7 +706,7 @@ watch_interval = 30       # watch 模式扫描间隔（秒）
 
 ---
 
-### 9.6 完整工作流程示例
+### 9.7 完整工作流程示例
 
 ```bash
 # Step 1: 批量下载快照
@@ -615,7 +758,7 @@ python combine_output.py \
 
 ---
 
-### 9.7 错误处理与日志
+### 9.8 错误处理与日志
 
 #### 错误分类
 
@@ -651,7 +794,7 @@ grep -c "success" journals-snapshot/snapshot-log.csv
 
 ---
 
-### 9.8 更新后的文件结构
+### 9.9 更新后的文件结构
 
 ```
 journal-host/
@@ -671,7 +814,7 @@ journal-host/
 
 ---
 
-### 9.9 combine_output.py - 数据整合工具
+### 9.10 combine_output.py - 数据整合工具
 
 #### 功能特点
 
@@ -807,7 +950,7 @@ URL 列:        D,F
 
 ---
 
-### 9.10 完整工作流程（含数据整合）
+### 9.11 完整工作流程（含数据整合）
 
 ```bash
 # Step 1: 批量下载快照
