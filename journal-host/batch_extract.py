@@ -338,13 +338,13 @@ def extract_institutions(md_file: Path, json_file: Path, config: Dict[str, Any],
         # 读取 Markdown 文件
         text = md_file.read_text(encoding='utf-8')
         
-        # 获取 API 配置
+        # 获取 API 配置（优先级：extract > llm > 环境变量）
         extract_config = config.get('extract', {})
-        api_config = config.get('api', {})
+        llm_config = config.get('llm', {})
         
         model_id = extract_config.get('model_id', 'gpt-4o-mini')
-        api_key = api_config.get('api_key') or os.environ.get('OPENAI_API_KEY') or os.environ.get('LANGEXTRACT_API_KEY')
-        api_base = api_config.get('api_base') or os.environ.get('OPENAI_API_BASE')
+        api_key = extract_config.get('api_key') or llm_config.get('api_key') or os.environ.get('OPENAI_API_KEY') or os.environ.get('LANGEXTRACT_API_KEY')
+        api_base = extract_config.get('api_base') or llm_config.get('api_base') or os.environ.get('OPENAI_API_BASE')
         
         # 根据 extract_method 决定提取策略
         institutions = []
@@ -590,13 +590,13 @@ def main():
         epilog="""
 示例:
   python batch_extract.py \\
-    --url-excel journals.xlsx \\
+    --input-excel journals.xlsx \\
     --name-column A \\
     --url-columns D,F \\
     --rows 4+
 
   python batch_extract.py \\
-    --url-excel journals.xlsx \\
+    --input-excel journals.xlsx \\
     --name-column A \\
     --url-columns D \\
     --rows 4-99 \\
@@ -605,7 +605,7 @@ def main():
     )
     
     parser.add_argument(
-        '--url-excel',
+        '--input-excel',
         required=True,
         help='Excel 文件路径'
     )
@@ -669,17 +669,17 @@ def main():
     
     # 命令行参数覆盖配置文件
     extract_config = config.get('extract', {})
-    api_config = config.get('api', {})
+    llm_config = config.get('llm', {})
     
     if args.model_id:
         extract_config['model_id'] = args.model_id
     if args.api_base:
-        api_config['api_base'] = args.api_base
+        extract_config['api_base'] = args.api_base
     if args.api_key:
-        api_config['api_key'] = args.api_key
+        extract_config['api_key'] = args.api_key
     
     config['extract'] = extract_config
-    config['api'] = api_config
+    config['llm'] = llm_config
     
     parallel = args.parallel if args.parallel is not None else extract_config.get('parallel', 2)
     retry_times = extract_config.get('retry_times', 3)
@@ -708,7 +708,7 @@ def main():
     print("=" * 60)
     print("[CONFIG] 批量信息提取工具 - 启动参数")
     print("=" * 60)
-    print(f"Excel 文件:    {args.url_excel}")
+    print(f"Excel 文件:    {args.input_excel}")
     print(f"Sheet 名称:    {args.sheet_name}")
     print(f"期刊名称列:    {args.name_column}")
     print(f"URL 列:        {args.url_columns}")
@@ -717,7 +717,7 @@ def main():
     print(f"强制重提取:    {'是' if args.force else '否'}")
     print(f"并行数量:      {parallel}")
     print(f"模型 ID:       {extract_config.get('model_id', 'gpt-4o-mini')}")
-    print(f"API Base:      {api_config.get('api_base', 'from env')}")
+    print(f"API Base:      {extract_config.get('api_base') or llm_config.get('api_base', 'from env')}")
     print(f"重试次数:      {retry_times}")
     print(f"重试延迟:      {retry_delay} 秒")
     print(f"配置文件:      config.toml")
@@ -725,7 +725,7 @@ def main():
     print()
     
     # 检查 Excel 文件
-    excel_path = Path(args.url_excel)
+    excel_path = Path(args.input_excel)
     if not excel_path.exists():
         print(f"[ERROR] Excel file not found: {excel_path}", file=sys.stderr)
         sys.exit(1)

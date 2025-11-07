@@ -2,13 +2,14 @@
 """
 LLM 调用模块 - llm_call.py
 
-支持 OpenAI 兼容接口的大模型调用，用于期刊主办单位联网搜索
+通用的 OpenAI 兼容接口调用模块，支持 JSON 格式输出
+用于各种需要结构化输出的 LLM 任务
 """
 
 import json
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Callable
 
 try:
     from openai import OpenAI
@@ -31,6 +32,9 @@ SEARCH_PROMPT_TEMPLATE = """期刊《{journal_name}》的主办单位是什么�
 3. 关键句子，网页中出现的主办单位名称所在的完整句子，用于人工核验正确性，要求可以在网页上准确匹配到相应的字符串
 4. 判断依据，为何判断关键句子中出现的这个单位就是主办方，逻辑是什么
 5. 来源链接，信息来源网页"""
+
+# 默认验证函数：检查必需字段
+SEARCH_REQUIRED_FIELDS = ["期刊名称", "主办单位", "关键句子", "判断依据", "来源链接"]
 
 
 # ========== JSON 解析 ==========
@@ -97,17 +101,19 @@ def extract_json_from_text(text: str) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
-def validate_result_item(item: Dict[str, Any]) -> bool:
+def validate_result_item(item: Dict[str, Any], required_fields: List[str] = None) -> bool:
     """
     验证结果项是否包含所有必需字段
     
     Args:
         item: 结果项字典
+        required_fields: 必需字段列表（默认为搜索任务的字段）
     
     Returns:
         是否有效
     """
-    required_fields = ["期刊名称", "主办单位", "关键句子", "判断依据", "来源链接"]
+    if required_fields is None:
+        required_fields = SEARCH_REQUIRED_FIELDS
     
     for field in required_fields:
         if field not in item or not item[field]:
@@ -116,25 +122,31 @@ def validate_result_item(item: Dict[str, Any]) -> bool:
     return True
 
 
-# ========== LLM 调用 ==========
+# ========== 通用 LLM 调用（JSON 输出）==========
 
-def call_llm_search(
-    journal_name: str,
+def call_llm_with_json_output(
+    prompt: str,
     model_id: str,
     api_key: str,
     api_base: str,
     timeout: int = 120,
+    temperature: float = 0.1,
+    required_fields: Optional[List[str]] = None,
+    validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
     logger = None
 ) -> Tuple[bool, Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]], str, float, Optional[str], Optional[str]]:
     """
-    调用大模型进行联网搜索
+    通用的 LLM 调用函数，要求返回 JSON 格式
     
     Args:
-        journal_name: 期刊名称
+        prompt: 提示词
         model_id: 模型 ID
         api_key: API Key
         api_base: API Base URL
         timeout: 请求超时时间（秒）
+        temperature: 温度参数
+        required_fields: 必需字段列表（用于默认验证）
+        validator: 自定义验证函数（优先级高于 required_fields）
         logger: 日志对象（可选）
     
     Returns:
@@ -150,13 +162,10 @@ def call_llm_search(
     if not OPENAI_AVAILABLE:
         return False, None, None, "none", 0.0, "library_error", "openai package not installed"
     
-    # 构造 prompt
-    prompt = SEARCH_PROMPT_TEMPLATE.format(journal_name=journal_name)
-    
     # 记录请求日志
     if logger:
         logger.info(f"\n{'='*60}")
-        logger.info(f"[REQUEST] 期刊名称: {journal_name}")
+        logger.info(f"[REQUEST] 模型: {model_id}")
         logger.info(f"[PROMPT]\n{prompt}")
         logger.info(f"{'='*60}\n")
     
@@ -178,7 +187,7 @@ def call_llm_search(
                     "content": prompt
                 }
             ],
-            temperature=0.1,
+            temperature=temperature,
         )
         elapsed_time = time.time() - start_time
         
@@ -200,7 +209,7 @@ def call_llm_search(
         # 记录响应日志
         if logger:
             logger.info(f"\n{'='*60}")
-            logger.info(f"[RESPONSE] 期刊名称: {journal_name}")
+            logger.info(f"[RESPONSE] 模型: {model_id}")
             logger.info(f"[耗时] {elapsed_time:.2f} 秒")
             if usage:
                 logger.info(f"[TOKEN] 输入: {usage['prompt_tokens']}, 输出: {usage['completion_tokens']}, 总计: {usage['total_tokens']} (来自API返回)")
@@ -224,8 +233,16 @@ def call_llm_search(
         valid_items = []
         invalid_count = 0
         
+        # 确定使用哪个验证函数
+        if validator:
+            validate_fn = validator
+        elif required_fields:
+            validate_fn = lambda item: validate_result_item(item, required_fields)
+        else:
+            validate_fn = validate_result_item
+        
         for item in parsed_data:
-            if validate_result_item(item):
+            if validate_fn(item):
                 valid_items.append(item)
             else:
                 invalid_count += 1
@@ -271,6 +288,46 @@ def call_llm_search(
             logger.error(f"[API 错误] {error_type}: {error_msg}")
         
         return False, None, None, "none", 0.0, error_type, error_msg
+
+
+# ========== 向后兼容：保留原有的 call_llm_search 函数 ==========
+
+def call_llm_search(
+    journal_name: str,
+    model_id: str,
+    api_key: str,
+    api_base: str,
+    timeout: int = 120,
+    logger = None
+) -> Tuple[bool, Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]], str, float, Optional[str], Optional[str]]:
+    """
+    调用大模型进行联网搜索（向后兼容函数）
+    
+    Args:
+        journal_name: 期刊名称
+        model_id: 模型 ID
+        api_key: API Key
+        api_base: API Base URL
+        timeout: 请求超时时间（秒）
+        logger: 日志对象（可选）
+    
+    Returns:
+        (成功标志, 结果列表, token使用统计, token来源, 耗时, 错误类型, 错误消息)
+    """
+    # 构造 prompt
+    prompt = SEARCH_PROMPT_TEMPLATE.format(journal_name=journal_name)
+    
+    # 调用通用函数
+    return call_llm_with_json_output(
+        prompt=prompt,
+        model_id=model_id,
+        api_key=api_key,
+        api_base=api_base,
+        timeout=timeout,
+        temperature=0.1,
+        required_fields=SEARCH_REQUIRED_FIELDS,
+        logger=logger
+    )
 
 
 # ========== 成本计算 ==========

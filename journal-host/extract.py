@@ -34,27 +34,27 @@ except ImportError:
 
 # 关键短语列表（用于句子筛选）
 KEY_PHRASES = [
-    "administrated",
-    "affiliate",
-    "compile",
-    "copyright ©",
-    "edited",
-    "funded",
-    "in association with",
-    "in cooperation with",
-    "journal of",
     "on behalf of",
-    "own",
-    "partnership",
-    "patronage",
-    "press",
+    "journal of",
     "publication of",
+    "affiliate",
+    "edited",
+    "own",
+    "in association with",
     "responsible",
-    "societies",
-    "sponsor",
     "supervise",
+    "sponsor",
+    "patronage",
+    "compile",
+    "partnership",
+    "societies",
+    "in cooperation with",
     "the backing of",
-    "©"
+    "administrated",
+    "copyright ©",
+    "©",
+    "press",
+    "funded"
 ]
 
 # 机构类型关键词映射

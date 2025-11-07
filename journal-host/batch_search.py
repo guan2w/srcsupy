@@ -304,15 +304,19 @@ def process_journal(
         'error_message': ''
     }
     
-    # 获取 API 配置
-    api_config = config.get('api', {})
+    # 获取配置（优先级：llm.search > llm > 环境变量）
+    llm_config = config.get('llm', {})
+    search_config = config.get('llm', {}).get('search', {})
     
-    model_id = api_config.get('search_model_id', 'qwen-plus')
-    api_key = api_config.get('api_key') or os.environ.get('OPENAI_API_KEY')
-    api_base = api_config.get('api_base') or os.environ.get('OPENAI_API_BASE')
-    timeout = api_config.get('search_timeout', 120)
-    price_input = api_config.get('price_per_1m_input_tokens', 2.75)
-    price_output = api_config.get('price_per_1m_output_tokens', 22.0)
+    # API 配置（search 可覆盖 llm 通用配置）
+    api_key = search_config.get('api_key') or llm_config.get('api_key') or os.environ.get('OPENAI_API_KEY')
+    api_base = search_config.get('api_base') or llm_config.get('api_base') or os.environ.get('OPENAI_API_BASE')
+    
+    # 搜索专用配置
+    model_id = search_config.get('model_id', 'qwen-plus')
+    timeout = search_config.get('timeout', 120)
+    price_input = search_config.get('price_per_1m_input_tokens', 2.75)
+    price_output = search_config.get('price_per_1m_output_tokens', 22.0)
     
     if not api_key:
         result['error_type'] = 'config_error'
@@ -501,17 +505,21 @@ def main():
     # 加载配置
     config = load_config("config.toml")
     
-    # 获取配置参数
-    api_config = config.get('api', {})
+    # 获取配置参数（优先级：llm.search > llm > 默认值）
+    llm_config = config.get('llm', {})
+    search_config = config.get('llm', {}).get('search', {})
     
-    parallel = args.parallel if args.parallel is not None else api_config.get('search_parallel', 10)
-    retry_times = api_config.get('search_retry_times', 3)
-    retry_delay = api_config.get('search_retry_delay', 5)
-    timeout = api_config.get('search_timeout', 120)
-    model_id = api_config.get('search_model_id', 'qwen-plus')
-    api_base = api_config.get('api_base', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
-    price_input = api_config.get('price_per_1m_input_tokens', 2.75)
-    price_output = api_config.get('price_per_1m_output_tokens', 22.0)
+    # API 配置（search 可覆盖 llm 通用配置）
+    api_base = search_config.get('api_base') or llm_config.get('api_base', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+    
+    # 搜索专用配置
+    parallel = args.parallel if args.parallel is not None else search_config.get('parallel', 10)
+    retry_times = search_config.get('retry_times', 3)
+    retry_delay = search_config.get('retry_delay', 5)
+    timeout = search_config.get('timeout', 120)
+    model_id = search_config.get('model_id', 'qwen-plus')
+    price_input = search_config.get('price_per_1m_input_tokens', 2.75)
+    price_output = search_config.get('price_per_1m_output_tokens', 22.0)
     
     # 生成日志文件名（带模型名称和时间戳）
     timestamp = datetime.now().strftime("%y%m%d.%H%M%S")

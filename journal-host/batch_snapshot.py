@@ -388,13 +388,13 @@ def main():
         epilog="""
 示例:
   python batch_snapshot.py \\
-    --url-excel journals.xlsx \\
+    --input-excel journals.xlsx \\
     --name-column A \\
     --url-columns D,F \\
     --rows 4+
 
   python batch_snapshot.py \\
-    --url-excel journals.xlsx \\
+    --input-excel journals.xlsx \\
     --name-column A \\
     --url-columns D \\
     --rows 4-99 \\
@@ -403,7 +403,7 @@ def main():
     )
     
     parser.add_argument(
-        '--url-excel',
+        '--input-excel',
         required=True,
         help='Excel 文件路径'
     )
@@ -463,7 +463,7 @@ def main():
     print("=" * 60)
     print("[CONFIG] 批量快照下载工具 - 启动参数")
     print("=" * 60)
-    print(f"Excel 文件:    {args.url_excel}")
+    print(f"Excel 文件:    {args.input_excel}")
     print(f"Sheet 名称:    {args.sheet_name}")
     print(f"期刊名称列:    {args.name_column}")
     print(f"URL 列:        {args.url_columns}")
@@ -477,7 +477,7 @@ def main():
     print()
     
     # 检查 Excel 文件
-    excel_path = Path(args.url_excel)
+    excel_path = Path(args.input_excel)
     if not excel_path.exists():
         print(f"[ERROR] Excel file not found: {excel_path}", file=sys.stderr)
         sys.exit(1)
