@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     import pandas as pd
     from openpyxl import load_workbook
-    from openpyxl.styles import PatternFill, Font
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     PANDAS_AVAILABLE = True
 except ImportError:
@@ -168,7 +168,7 @@ def load_host_json(snapshot_dir: Path, url_hash: str) -> Optional[List[Dict[str,
     return None
 
 
-def load_extract_results(snapshot_dir: Path, urls: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+def load_extract_results(snapshot_dir: Path, urls: List[str]) -> Tuple[Dict[str, List[str]], List[Dict[str, Any]]]:
     """
     从 snapshot 目录加载方式1的提取结果
     
@@ -177,9 +177,15 @@ def load_extract_results(snapshot_dir: Path, urls: List[str]) -> Dict[str, List[
         urls: URL 列表
     
     Returns:
-        {关键词(小写): [机构名称列表]}
+        (keyword_results, unmatched_results)
+        - keyword_results: {关键词(小写): [机构名称列表]}
+        - unmatched_results: [{keyword: str, name: str}, ...] 未匹配任何关键词的项
     """
     keyword_results = {}
+    unmatched_results = []
+    
+    # 获取所有关键词的小写集合
+    keyword_lower_set = {kw.lower() for kw in KEYWORD_COLUMNS}
     
     for url in urls:
         if not url:
@@ -193,12 +199,23 @@ def load_extract_results(snapshot_dir: Path, urls: List[str]) -> Dict[str, List[
                 keyword = inst.get('matched_keyword', '').strip().lower()
                 name = inst.get('name', '').strip()
                 
-                if keyword and name:
+                if not name:
+                    continue
+                
+                if keyword and keyword in keyword_lower_set:
+                    # 匹配到关键词
                     if keyword not in keyword_results:
                         keyword_results[keyword] = []
                     keyword_results[keyword].append(name)
+                else:
+                    # 未匹配任何关键词，保存原始keyword和name
+                    original_keyword = inst.get('matched_keyword', '').strip()
+                    unmatched_results.append({
+                        'keyword': original_keyword if original_keyword else '未知',
+                        'name': name
+                    })
     
-    return keyword_results
+    return keyword_results, unmatched_results
 
 
 def load_url_scan_log(log_file: Path) -> Dict[str, Dict[str, Any]]:
@@ -267,17 +284,29 @@ def load_search_log(log_file: Path) -> Dict[str, List[Dict[str, Any]]]:
 
 # ========== 数据整合 ==========
 
-def merge_list_values(values: List[str]) -> str:
-    """将列表值用`;`合并为字符串"""
+def merge_list_values(values: List[Any]) -> str:
+    """将列表值用`;`合并为字符串，支持字符串和列表"""
     if not values:
         return ""
     # 去重并保持顺序
     seen = set()
     unique_values = []
     for v in values:
-        if v and v not in seen:
-            seen.add(v)
-            unique_values.append(v)
+        if not v:
+            continue
+        # 如果 v 是列表，先展开
+        if isinstance(v, list):
+            for item in v:
+                if item and str(item).strip():
+                    item_str = str(item).strip()
+                    if item_str not in seen:
+                        seen.add(item_str)
+                        unique_values.append(item_str)
+        else:
+            v_str = str(v).strip()
+            if v_str and v_str not in seen:
+                seen.add(v_str)
+                unique_values.append(v_str)
     return ";".join(unique_values)
 
 
@@ -311,13 +340,13 @@ def combine_data(
     
     # 处理每一行
     for idx, row in df.iterrows():
-        journal_name = str(row[journal_name_col]).strip() if pd.notna(row[journal_name_col]) else ""
-        intro_url = str(row[intro_url_col]).strip() if pd.notna(row[intro_url_col]) else ""
-        host_url = str(row[host_url_col]).strip() if pd.notna(row[host_url_col]) else ""
-        issn = str(row[issn_col]).strip() if pd.notna(row[issn_col]) else ""
-        eissn = str(row[eissn_col]).strip() if pd.notna(row[eissn_col]) else ""
-        manual_unit = str(row[manual_unit_col]).strip() if pd.notna(row[manual_unit_col]) else ""
-        manual_sentence = str(row[manual_sentence_col]).strip() if pd.notna(row[manual_sentence_col]) else ""
+        journal_name = str(row.iloc[journal_name_col]).strip() if pd.notna(row.iloc[journal_name_col]) else ""
+        intro_url = str(row.iloc[intro_url_col]).strip() if pd.notna(row.iloc[intro_url_col]) else ""
+        host_url = str(row.iloc[host_url_col]).strip() if pd.notna(row.iloc[host_url_col]) else ""
+        issn = str(row.iloc[issn_col]).strip() if pd.notna(row.iloc[issn_col]) else ""
+        eissn = str(row.iloc[eissn_col]).strip() if pd.notna(row.iloc[eissn_col]) else ""
+        manual_unit = str(row.iloc[manual_unit_col]).strip() if pd.notna(row.iloc[manual_unit_col]) else ""
+        manual_sentence = str(row.iloc[manual_sentence_col]).strip() if pd.notna(row.iloc[manual_sentence_col]) else ""
         
         # 初始化输出行
         output_row = {
@@ -351,16 +380,26 @@ def combine_data(
         # 添加关键词列（方式1）
         for keyword in KEYWORD_COLUMNS:
             output_row[f'关键词_{keyword}'] = ""
+        output_row['关键词_其他'] = ""
         
         # === 方式1：按关键词规则提取 ===
         urls = [intro_url, host_url]
-        keyword_results = load_extract_results(snapshot_dir, urls)
+        keyword_results, unmatched_results = load_extract_results(snapshot_dir, urls)
         
         for keyword_display in KEYWORD_COLUMNS:
             keyword_lower = keyword_display.lower()
             if keyword_lower in keyword_results:
                 institutions = keyword_results[keyword_lower]
                 output_row[f'关键词_{keyword_display}'] = merge_list_values(institutions)
+        
+        # 处理未匹配的项，格式为 "keyword: matches;..."
+        if unmatched_results:
+            other_items = []
+            for item in unmatched_results:
+                keyword = item['keyword']
+                name = item['name']
+                other_items.append(f"{keyword}: {name}")
+            output_row['关键词_其他'] = ";".join(other_items)
         
         # === 方式2：AI精准操作提示 ===
         if url_scan_results and journal_name in url_scan_results:
@@ -438,11 +477,22 @@ def write_output_excel(output_rows: List[Dict[str, Any]], output_file: Path):
             },
             {
                 'name': '按关键词规则提取',
-                'fields': KEYWORD_COLUMNS,
+                'fields': KEYWORD_COLUMNS + ['其他'],
                 'color': '249087',
                 'font_color': 'FFFFFF'
             }
         ]
+        
+        # 定义边框样式
+        border_style = Border(
+            left=Side(style='thin', color='666666'),
+            right=Side(style='thin', color='666666'),
+            top=Side(style='thin', color='666666'),
+            bottom=Side(style='thin', color='666666')
+        )
+        
+        # 定义对齐样式（居中）
+        alignment_center = Alignment(horizontal='center', vertical='center', wrap_text=True)
         
         # 写入第一行（分组）和第二行（字段）
         col_idx = 1
@@ -457,6 +507,8 @@ def write_output_excel(output_rows: List[Dict[str, Any]], output_file: Path):
             )
             cell = ws.cell(row=1, column=start_col, value=group['name'])
             cell.fill = PatternFill(start_color=group['color'], end_color=group['color'], fill_type='solid')
+            cell.border = border_style
+            cell.alignment = alignment_center
             
             # 设置字体颜色（如果需要）
             if group.get('font_color'):
@@ -468,6 +520,8 @@ def write_output_excel(output_rows: List[Dict[str, Any]], output_file: Path):
             for i, field in enumerate(group['fields']):
                 cell = ws.cell(row=2, column=start_col + i, value=field)
                 cell.fill = PatternFill(start_color=group['color'], end_color=group['color'], fill_type='solid')
+                cell.border = border_style
+                cell.alignment = alignment_center
                 
                 # 设置字体颜色
                 if group.get('font_color'):
