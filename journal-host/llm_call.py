@@ -213,12 +213,14 @@ def validate_result_item(item: Dict[str, Any], required_fields: List[str] = None
     
     Returns:
         是否有效
+    
+    注意：只检查字段是否存在，允许字段值为空字符串
     """
     if required_fields is None:
         required_fields = SEARCH_REQUIRED_FIELDS
     
     for field in required_fields:
-        if field not in item or not item[field]:
+        if field not in item:
             return False
     
     return True
