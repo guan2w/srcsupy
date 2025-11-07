@@ -7,7 +7,9 @@
 - **batch_snapshot.py** - 批量网页快照下载
 - **batch_extract.py** - 批量智能提取
 - **batch_search.py** - 批量联网搜索（LLM 直接搜索）
+- **batch_url_scan.py** - 批量 URL 深度扫描（精准操作提示）
 - **combine_extracted.py** - 数据整合与报告生成
+- **combine_output3.py** - 三种方法结果对比整合
 
 ---
 
@@ -205,6 +207,25 @@ python batch_search.py \
 
 **输出：**
 - `{excel}-output-{timestamp}.xlsx`: 完整报告（7列）
+
+### 6. 三种方法对比整合（combine_output3.py）
+
+**功能：** 整合三种提取方式的结果到单表，便于准确率对比评估
+
+**三种方式：**
+1. **按关键词规则提取**：snapshot → extract → 21个关键词分组
+2. **AI精准操作提示**：url_scan → 关联单位/关键句子/信息位置
+3. **AI核心目标提示**：search → 主办单位/关键句子/判断依据
+
+**特点：**
+- 双层表头（分组+字段），带色块区分
+- 冻结前两行表头
+- 多行结果自动合并（`;` 分隔）
+- 基于 log.csv 断点续传
+- 缺失 log 文件直接退出
+
+**输出：**
+- `{excel}-compare-output-{timestamp}.xlsx`: 对比报告（38列）
 
 ---
 
@@ -434,6 +455,43 @@ python combine_extracted.py \
 
 ---
 
+### 8.5 combine_output3.py - 三种方法对比整合
+
+**功能：** 整合三种提取方式的结果到单表，评估对比准确率
+
+**参数：**
+
+| 参数名 | 必填 | 说明 |
+|--------|------|------|
+| `--input-excel` | ✅ | Excel 文件路径 |
+| `--sheet-name` | ⛔ | Sheet 名称或索引，默认 0 |
+| `--rows` | ✅ | 行范围，如 "2-99"（第1行是表头） |
+
+**前置要求：**
+
+三种方法必须已执行并生成对应的 log 文件：
+1. `{excel_dir}/{excel_stem}-snapshot/extract-log.csv`
+2. `{excel_dir}/{excel_name}-url-scan-log.csv`
+3. `{excel_dir}/{excel_name}-search-log.csv`
+
+**示例：**
+
+```bash
+# 先执行三种方法（按需执行）
+python batch_snapshot.py --input-excel test.xlsx --name-column A --url-columns B,C --rows 2-99
+python batch_extract.py --input-excel test.xlsx --name-column A --url-columns B,C --rows 2-99
+python batch_url_scan.py --input-excel test.xlsx --name-column A --url-columns B,C --rows 2-99
+python batch_search.py --input-excel test.xlsx --name-column A --rows 2-99
+
+# 整合对比
+python combine_output3.py \
+  --input-excel test.xlsx \
+  --sheet-name 0 \
+  --rows 2-99
+```
+
+---
+
 ## 九、依赖包
 
 ```bash
@@ -488,7 +546,7 @@ A: 查看 `batch_search-{model}-{timestamp}.log` 文件，包含完整的请求�
 
 - [x] ~~新的采集方法：URL 深度扫描（直接分析指定网页）~~ ✅ 已完成
 - [x] ~~Prompt 模板管理：提取到独立目录便于维护~~ ✅ 已完成
-- [ ] 采集方法评估：汇总多种方法结果，自动对比评估
+- [x] ~~采集方法评估：汇总多种方法结果，自动对比评估~~ ✅ 已完成
 - [ ] Web UI：可视化操作界面
 - [ ] 结果去重与合并：智能识别重复机构
 
