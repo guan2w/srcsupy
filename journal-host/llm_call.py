@@ -428,7 +428,7 @@ def call_llm_search(
         api_key=api_key,
         api_base=api_base,
         timeout=timeout,
-        temperature=0.1,
+        temperature=0.0,
         required_fields=SEARCH_REQUIRED_FIELDS,
         logger=logger
     )
@@ -474,7 +474,7 @@ def call_llm_url_scan(
         api_key=api_key,
         api_base=api_base,
         timeout=timeout,
-        temperature=0.1,
+        temperature=0.0,
         required_fields=SCAN_REQUIRED_FIELDS,
         logger=logger
     )

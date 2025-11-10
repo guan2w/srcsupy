@@ -72,3 +72,4 @@ print("[OK] 测试完成")
 print(f"如果你看到了浏览器窗口，说明 headless=false 生效了")
 print(f"如果你没看到浏览器窗口，说明可能有其他问题")
 
+
