@@ -334,11 +334,15 @@ def combine_data(
     df: pd.DataFrame,
     header_names: List[str],
     snapshot_dir: Path,
-    url_scan_results: Dict[str, Dict[str, Any]],
-    search_results: Dict[str, List[Dict[str, Any]]]
+    url_scan_results: Optional[Dict[str, Dict[str, Any]]],
+    search_results: Optional[Dict[str, List[Dict[str, Any]]]],
+    include_methods: set
 ) -> List[Dict[str, Any]]:
     """
     整合所有数据
+    
+    Args:
+        include_methods: 包含的方法集合，如 {'extract', 'scan', 'search'}
     
     Returns:
         输出行列表
@@ -403,26 +407,27 @@ def combine_data(
         output_row['关键词_其他'] = ""
         
         # === 方式1：按关键词规则提取 ===
-        urls = [intro_url, host_url]
-        keyword_results, unmatched_results = load_extract_results(snapshot_dir, urls)
-        
-        for keyword_display in KEYWORD_COLUMNS:
-            keyword_lower = keyword_display.lower()
-            if keyword_lower in keyword_results:
-                institutions = keyword_results[keyword_lower]
-                output_row[f'关键词_{keyword_display}'] = merge_list_values(institutions)
-        
-        # 处理未匹配的项，格式为 "keyword: matches;..."
-        if unmatched_results:
-            other_items = []
-            for item in unmatched_results:
-                keyword = item['keyword']
-                name = item['name']
-                other_items.append(f"{keyword}: {name}")
-            output_row['关键词_其他'] = ";".join(other_items)
+        if 'extract' in include_methods:
+            urls = [intro_url, host_url]
+            keyword_results, unmatched_results = load_extract_results(snapshot_dir, urls)
+            
+            for keyword_display in KEYWORD_COLUMNS:
+                keyword_lower = keyword_display.lower()
+                if keyword_lower in keyword_results:
+                    institutions = keyword_results[keyword_lower]
+                    output_row[f'关键词_{keyword_display}'] = merge_list_values(institutions)
+            
+            # 处理未匹配的项，格式为 "keyword: matches;..."
+            if unmatched_results:
+                other_items = []
+                for item in unmatched_results:
+                    keyword = item['keyword']
+                    name = item['name']
+                    other_items.append(f"{keyword}: {name}")
+                output_row['关键词_其他'] = ";".join(other_items)
         
         # === 方式2：AI精准操作提示 ===
-        if url_scan_results and journal_name in url_scan_results:
+        if 'scan' in include_methods and url_scan_results and journal_name in url_scan_results:
             scan_data = url_scan_results[journal_name]
             results = scan_data['results']
             if results:
@@ -437,7 +442,7 @@ def combine_data(
                 output_row['AI精准_来源链接2'] = scan_data['url2']
         
         # === 方式3：AI核心目标提示 ===
-        if search_results and journal_name in search_results:
+        if 'search' in include_methods and search_results and journal_name in search_results:
             results = search_results[journal_name]
             if results:
                 # 合并多个结果
@@ -596,13 +601,20 @@ def main():
   python combine_output3.py \\
     --input-excel journals.xlsx \\
     --sheet-name 0 \\
-    --rows 2+
+    --rows 2+ \\
+    --include extract,scan
+
+  python combine_output3.py \\
+    --input-excel journals.xlsx \\
+    --sheet-name 0 \\
+    --rows 2+ \\
+    --include search
 
 前置要求：
-  三种方法必须已执行并生成对应的 log 文件：
-  1. {excel_dir}/{excel_stem}-snapshot/extract-log.csv
-  2. {excel_dir}/{excel_name}-url-scan-log.csv
-  3. {excel_dir}/{excel_name}-search-log.csv
+  根据 --include 参数，相应的 log 文件必须存在：
+  1. extract: {excel_dir}/{excel_stem}-snapshot/extract-log.csv
+  2. scan: {excel_dir}/{excel_name}-url-scan-log.csv
+  3. search: {excel_dir}/{excel_name}-search-log.csv
         """
     )
     
@@ -621,8 +633,34 @@ def main():
         required=True,
         help='行范围，如 "2-99" 或 "2+"（从第2行开始到空行结束，第1行是表头）'
     )
+    parser.add_argument(
+        '--include',
+        default='extract,scan,search',
+        help='要包含的提取方式，逗号分隔，可选值：extract（方式1：按关键词规则提取）、scan（方式2：AI精准操作提示）、search（方式3：AI核心目标提示）。默认：extract,scan,search'
+    )
     
     args = parser.parse_args()
+    
+    # 解析 include 参数
+    valid_methods = {'extract', 'scan', 'search'}
+    include_methods_str = args.include.strip()
+    if not include_methods_str:
+        print("[ERROR] --include 参数不能为空", file=sys.stderr)
+        sys.exit(1)
+    
+    include_methods = set()
+    for method in include_methods_str.split(','):
+        method = method.strip().lower()
+        if not method:
+            continue
+        if method not in valid_methods:
+            print(f"[ERROR] 无效的提取方式: {method}。有效值: {', '.join(sorted(valid_methods))}", file=sys.stderr)
+            sys.exit(1)
+        include_methods.add(method)
+    
+    if not include_methods:
+        print("[ERROR] --include 参数必须包含至少一个有效的提取方式", file=sys.stderr)
+        sys.exit(1)
     
     # 打印配置参数
     print("=" * 60)
@@ -631,6 +669,7 @@ def main():
     print(f"Excel 文件:    {args.input_excel}")
     print(f"Sheet 名称:    {args.sheet_name}")
     print(f"行范围:        {args.rows}")
+    print(f"包含方式:      {', '.join(sorted(include_methods))}")
     print("=" * 60)
     print()
     
@@ -663,24 +702,30 @@ def main():
     search_log = excel_path.parent / f"{excel_path.name}-search-log.csv"
     
     print(f"[CHECK] 检查 log 文件...")
-    print(f"  方式1 (extract): {extract_log}")
-    print(f"  方式2 (url_scan): {url_scan_log}")
-    print(f"  方式3 (search): {search_log}")
+    if 'extract' in include_methods:
+        print(f"  方式1 (extract): {extract_log}")
+    if 'scan' in include_methods:
+        print(f"  方式2 (scan): {url_scan_log}")
+    if 'search' in include_methods:
+        print(f"  方式3 (search): {search_log}")
     print()
     
-    # 检查 log 文件是否存在
+    # 检查 log 文件是否存在（仅检查包含的方式）
     missing_logs = []
     
-    if not snapshot_dir.exists():
-        missing_logs.append(f"  - snapshot 目录不存在: {snapshot_dir}")
-    elif not extract_log.exists():
-        missing_logs.append(f"  - extract-log.csv 不存在: {extract_log}")
+    if 'extract' in include_methods:
+        if not snapshot_dir.exists():
+            missing_logs.append(f"  - snapshot 目录不存在: {snapshot_dir}")
+        elif not extract_log.exists():
+            missing_logs.append(f"  - extract-log.csv 不存在: {extract_log}")
     
-    if not url_scan_log.exists():
-        missing_logs.append(f"  - url-scan-log.csv 不存在: {url_scan_log}")
+    if 'scan' in include_methods:
+        if not url_scan_log.exists():
+            missing_logs.append(f"  - url-scan-log.csv 不存在: {url_scan_log}")
     
-    if not search_log.exists():
-        missing_logs.append(f"  - search-log.csv 不存在: {search_log}")
+    if 'search' in include_methods:
+        if not search_log.exists():
+            missing_logs.append(f"  - search-log.csv 不存在: {search_log}")
     
     if missing_logs:
         print("[ERROR] 缺少必需的 log 文件:", file=sys.stderr)
@@ -689,7 +734,7 @@ def main():
         print("\n请先运行对应的批处理脚本生成 log 文件。", file=sys.stderr)
         sys.exit(1)
     
-    print("[OK] 所有 log 文件已就绪")
+    print("[OK] 所有必需的 log 文件已就绪")
     print()
     
     # 读取输入 Excel
@@ -698,25 +743,31 @@ def main():
     print(f"[COMBINE] 读取到 {len(df)} 行数据")
     print()
     
-    # 加载三种方法的结果
-    print(f"[COMBINE] 加载方式2结果 (url_scan)...")
-    url_scan_results = load_url_scan_log(url_scan_log)
-    if url_scan_results is None:
-        print("[ERROR] 加载 url_scan log 失败", file=sys.stderr)
-        sys.exit(1)
-    print(f"[COMBINE] url_scan 结果: {len(url_scan_results)} 个期刊")
+    # 加载包含的方法的结果
+    url_scan_results = None
+    search_results = None
     
-    print(f"[COMBINE] 加载方式3结果 (search)...")
-    search_results = load_search_log(search_log)
-    if search_results is None:
-        print("[ERROR] 加载 search log 失败", file=sys.stderr)
-        sys.exit(1)
-    print(f"[COMBINE] search 结果: {len(search_results)} 个期刊")
+    if 'scan' in include_methods:
+        print(f"[COMBINE] 加载方式2结果 (scan)...")
+        url_scan_results = load_url_scan_log(url_scan_log)
+        if url_scan_results is None:
+            print("[ERROR] 加载 url_scan log 失败", file=sys.stderr)
+            sys.exit(1)
+        print(f"[COMBINE] scan 结果: {len(url_scan_results)} 个期刊")
+    
+    if 'search' in include_methods:
+        print(f"[COMBINE] 加载方式3结果 (search)...")
+        search_results = load_search_log(search_log)
+        if search_results is None:
+            print("[ERROR] 加载 search log 失败", file=sys.stderr)
+            sys.exit(1)
+        print(f"[COMBINE] search 结果: {len(search_results)} 个期刊")
+    
     print()
     
     # 整合数据
     print(f"[COMBINE] 整合数据...")
-    output_rows = combine_data(df, header_names, snapshot_dir, url_scan_results, search_results)
+    output_rows = combine_data(df, header_names, snapshot_dir, url_scan_results, search_results, include_methods)
     print(f"[COMBINE] 生成 {len(output_rows)} 行输出")
     print()
     
