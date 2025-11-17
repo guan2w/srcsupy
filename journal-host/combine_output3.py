@@ -96,23 +96,48 @@ def parse_rows_range(rows_str: str) -> Tuple[int, Optional[int]]:
 
 # ========== 数据读取 ==========
 
+def find_column_index(header_names: List[str], candidates: List[str]) -> Tuple[Optional[int], Optional[str]]:
+    """
+    在表头中查找匹配的列
+    
+    Args:
+        header_names: 表头列名列表
+        candidates: 候选列名列表（按优先级排序）
+    
+    Returns:
+        (列索引, 匹配的列名) 或 (None, None)
+    """
+    for candidate in candidates:
+        try:
+            idx = header_names.index(candidate)
+            return idx, candidate
+        except ValueError:
+            continue
+    return None, None
+
+
 def read_input_excel(
     excel_path: Path,
     sheet_name: Any,
+    header_row: int,
     start_row: int,
     end_row: Optional[int]
 ) -> Tuple[List[str], pd.DataFrame]:
     """
     从 Excel 文件读取原始数据
     
+    Args:
+        header_row: 表头所在行号（从1开始计数）
+    
     Returns:
         (header_names, dataframe)
     """
     try:
-        # 先读取表头（第一行）
+        # 读取表头（指定行号）
         header_df = pd.read_excel(
             excel_path,
             sheet_name=sheet_name,
+            skiprows=header_row - 1,  # 跳过表头之前的行
             nrows=1,
             header=None,
             engine='openpyxl'
@@ -349,57 +374,93 @@ def combine_data(
     """
     output_rows = []
     
-    # 找到关键列的索引
-    try:
-        journal_name_col = header_names.index('期刊名称')
-        intro_url_col = header_names.index('期刊官方简介链接')
-        host_url_col = header_names.index('主办单位官方链接')
-        issn_col = header_names.index('ISSN')
-        eissn_col = header_names.index('eISSN')
-        manual_unit_col = header_names.index('人工判断单位')
-        manual_sentence_col = header_names.index('人工判断关键语句')
-    except ValueError as e:
-        print(f"[ERROR] Required column not found in header: {e}", file=sys.stderr)
+    # 动态查找列索引（必需列和可选列）
+    # 必需列：期刊名称
+    journal_name_col, journal_name_matched = find_column_index(header_names, ['期刊名称', 'Journal Name', '刊名'])
+    if journal_name_col is None:
+        print(f"[ERROR] 必需列未找到: 期刊名称（或 Journal Name、刊名）", file=sys.stderr)
         sys.exit(1)
+    
+    # 可选列：URL相关
+    intro_url_col, _ = find_column_index(header_names, ['期刊官方简介链接', '简介链接'])
+    homepage_url_col, _ = find_column_index(header_names, ['期刊主页链接', '主页链接'])
+    host_url_col, _ = find_column_index(header_names, ['主办单位官方链接', '主办链接'])
+    
+    # 可选列：其他信息
+    issn_col, _ = find_column_index(header_names, ['ISSN'])
+    eissn_col, _ = find_column_index(header_names, ['eISSN', 'E-ISSN'])
+    
+    # 可选列：人工查找
+    manual_unit_col, _ = find_column_index(header_names, ['人工判断单位', '人工单位'])
+    manual_sentence_col, _ = find_column_index(header_names, ['人工判断关键语句', '人工语句', '关键语句'])
+    
+    # 打印列映射信息
+    print(f"[COMBINE] 列映射:")
+    print(f"  必需列:")
+    print(f"    - 期刊名称: 第{journal_name_col + 1}列 ({journal_name_matched})")
+    print(f"  可选列:")
+    if intro_url_col is not None:
+        print(f"    - 期刊官方简介链接: 第{intro_url_col + 1}列")
+    if homepage_url_col is not None:
+        print(f"    - 期刊主页链接: 第{homepage_url_col + 1}列")
+    if host_url_col is not None:
+        print(f"    - 主办单位官方链接: 第{host_url_col + 1}列")
+    if issn_col is not None:
+        print(f"    - ISSN: 第{issn_col + 1}列")
+    if eissn_col is not None:
+        print(f"    - eISSN: 第{eissn_col + 1}列")
+    if manual_unit_col is not None:
+        print(f"    - 人工判断单位: 第{manual_unit_col + 1}列")
+    if manual_sentence_col is not None:
+        print(f"    - 人工判断关键语句: 第{manual_sentence_col + 1}列")
+    print()
     
     # 处理每一行
     for idx, row in df.iterrows():
+        # 获取期刊名称（必需）
         journal_name = str(row.iloc[journal_name_col]).strip() if pd.notna(row.iloc[journal_name_col]) else ""
-        intro_url = str(row.iloc[intro_url_col]).strip() if pd.notna(row.iloc[intro_url_col]) else ""
-        host_url = str(row.iloc[host_url_col]).strip() if pd.notna(row.iloc[host_url_col]) else ""
-        issn = str(row.iloc[issn_col]).strip() if pd.notna(row.iloc[issn_col]) else ""
-        eissn = str(row.iloc[eissn_col]).strip() if pd.notna(row.iloc[eissn_col]) else ""
-        manual_unit = str(row.iloc[manual_unit_col]).strip() if pd.notna(row.iloc[manual_unit_col]) else ""
-        manual_sentence = str(row.iloc[manual_sentence_col]).strip() if pd.notna(row.iloc[manual_sentence_col]) else ""
+        
+        # 获取可选列的值
+        def get_col_value(col_idx):
+            """安全获取列值"""
+            return str(row.iloc[col_idx]).strip() if col_idx is not None and pd.notna(row.iloc[col_idx]) else ""
+        
+        intro_url = get_col_value(intro_url_col)
+        homepage_url = get_col_value(homepage_url_col)
+        host_url = get_col_value(host_url_col)
+        issn = get_col_value(issn_col)
+        eissn = get_col_value(eissn_col)
+        manual_unit = get_col_value(manual_unit_col)
+        manual_sentence = get_col_value(manual_sentence_col)
         
         # 初始化输出行
-        output_row = {
-            # 原始数据
-            '原始_期刊名称': journal_name,
-            '原始_期刊官方简介链接': intro_url,
-            '原始_主办单位官方链接': host_url,
-            '原始_ISSN': issn,
-            '原始_eISSN': eissn,
-            
-            # 人工查找
-            '人工_人工判断单位': manual_unit,
-            '人工_人工判断关键语句': manual_sentence,
-            
-            # AI精准操作提示（方式2）
-            'AI精准_期刊名称': "",
-            'AI精准_关联单位': "",
-            'AI精准_关键句子': "",
-            'AI精准_信息位置': "",
-            'AI精准_来源链接1': "",
-            'AI精准_来源链接2': "",
-            
-            # AI核心目标提示（方式3）
-            'AI核心_期刊名称': "",
-            'AI核心_主办单位': "",
-            'AI核心_关键句子': "",
-            'AI核心_判断依据': "",
-            'AI核心_来源链接': "",
-        }
+        output_row = {}
+        
+        # 输出所有原始列（保持原始列名和顺序）
+        for col_idx, col_name in enumerate(header_names):
+            value = str(row.iloc[col_idx]).strip() if pd.notna(row.iloc[col_idx]) else ""
+            output_row[f'原始_{col_name}'] = value
+        
+        # 人工查找列（如果存在）
+        if manual_unit_col is not None:
+            output_row['人工_人工判断单位'] = manual_unit
+        if manual_sentence_col is not None:
+            output_row['人工_人工判断关键语句'] = manual_sentence
+        
+        # AI精准操作提示（方式2）
+        output_row['AI精准_期刊名称'] = ""
+        output_row['AI精准_关联单位'] = ""
+        output_row['AI精准_关键句子'] = ""
+        output_row['AI精准_信息位置'] = ""
+        output_row['AI精准_来源链接1'] = ""
+        output_row['AI精准_来源链接2'] = ""
+        
+        # AI核心目标提示（方式3）
+        output_row['AI核心_期刊名称'] = ""
+        output_row['AI核心_主办单位'] = ""
+        output_row['AI核心_关键句子'] = ""
+        output_row['AI核心_判断依据'] = ""
+        output_row['AI核心_来源链接'] = ""
         
         # 添加关键词列（方式1）
         for keyword in KEYWORD_COLUMNS:
@@ -408,7 +469,15 @@ def combine_data(
         
         # === 方式1：按关键词规则提取 ===
         if 'extract' in include_methods:
-            urls = [intro_url, host_url]
+            # 智能收集所有可用的URL
+            urls = []
+            if intro_url:
+                urls.append(intro_url)
+            if homepage_url:
+                urls.append(homepage_url)
+            if host_url:
+                urls.append(host_url)
+            
             keyword_results, unmatched_results = load_extract_results(snapshot_dir, urls)
             
             for keyword_display in KEYWORD_COLUMNS:
@@ -461,7 +530,7 @@ def combine_data(
 
 def write_output_excel(output_rows: List[Dict[str, Any]], output_file: Path):
     """
-    写入 Excel，带双层表头和颜色标记
+    写入 Excel，带双层表头和颜色标记（动态生成列）
     """
     try:
         # 创建 DataFrame
@@ -478,35 +547,68 @@ def write_output_excel(output_rows: List[Dict[str, Any]], output_file: Path):
         ws = wb.active
         ws.title = '整合输出'
         
-        # 定义分组和字段
-        groups = [
-            {
-                'name': '原始数据',
-                'fields': ['期刊名称', '期刊官方简介链接', '主办单位官方链接', 'ISSN', 'eISSN'],
+        # 动态提取各组的字段列表
+        original_fields = []  # 原始信息列
+        manual_fields = []    # 人工查找列
+        ai_scan_fields = []   # AI精准操作提示列
+        ai_search_fields = [] # AI核心目标提示列
+        keyword_fields = []   # 关键词列
+        
+        for col in df.columns:
+            if col.startswith('原始_'):
+                original_fields.append(col.replace('原始_', ''))
+            elif col.startswith('人工_'):
+                manual_fields.append(col.replace('人工_', ''))
+            elif col.startswith('AI精准_'):
+                ai_scan_fields.append(col.replace('AI精准_', ''))
+            elif col.startswith('AI核心_'):
+                ai_search_fields.append(col.replace('AI核心_', ''))
+            elif col.startswith('关键词_'):
+                keyword_fields.append(col.replace('关键词_', ''))
+        
+        # 构建分组列表（仅包含有字段的分组）
+        groups = []
+        
+        # 原始信息（总是有）
+        if original_fields:
+            groups.append({
+                'name': '原始信息',
+                'fields': original_fields,
                 'color': 'FACDED'
-            },
-            {
+            })
+        
+        # 人工查找（如果有）
+        if manual_fields:
+            groups.append({
                 'name': '人工查找',
-                'fields': ['人工判断单位', '人工判断关键语句'],
+                'fields': manual_fields,
                 'color': '7CDED7'
-            },
-            {
+            })
+        
+        # AI精准操作提示（如果有）
+        if ai_scan_fields:
+            groups.append({
                 'name': 'AI精准操作提示',
-                'fields': ['期刊名称', '关联单位', '关键句子', '信息位置', '来源链接1', '来源链接2'],
+                'fields': ai_scan_fields,
                 'color': 'FFF258'
-            },
-            {
+            })
+        
+        # AI核心目标提示（如果有）
+        if ai_search_fields:
+            groups.append({
                 'name': 'AI核心目标提示',
-                'fields': ['期刊名称', '主办单位', '关键句子', '判断依据', '来源链接'],
+                'fields': ai_search_fields,
                 'color': 'BACEFD'
-            },
-            {
+            })
+        
+        # 按关键词规则提取（如果有）
+        if keyword_fields:
+            groups.append({
                 'name': '按关键词规则提取',
-                'fields': KEYWORD_COLUMNS + ['其他'],
+                'fields': keyword_fields,
                 'color': '249087',
                 'font_color': 'FFFFFF'
-            }
-        ]
+            })
         
         # 定义边框样式
         border_style = Border(
@@ -593,28 +695,35 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
+  # 基本用法（表头在第1行，数据从第2行开始）
   python combine_output3.py \\
     --input-excel journals.xlsx \\
     --sheet-name 0 \\
     --rows 2-99
 
+  # 表头在第2行，数据从第3行开始（新格式）
+  python combine_output3.py \\
+    --input-excel input.xlsx \\
+    --sheet-name "待采集明细（13588条）" \\
+    --header-row 2 \\
+    --rows 3-1102 \\
+    --include scan,search
+
+  # 只使用特定提取方式
   python combine_output3.py \\
     --input-excel journals.xlsx \\
     --sheet-name 0 \\
-    --rows 2+ \\
+    --header-row 2 \\
+    --rows 3+ \\
     --include extract,scan
 
-  python combine_output3.py \\
-    --input-excel journals.xlsx \\
-    --sheet-name 0 \\
-    --rows 2+ \\
-    --include search
-
 前置要求：
-  根据 --include 参数，相应的 log 文件必须存在：
-  1. extract: {excel_dir}/{excel_stem}-snapshot/extract-log.csv
-  2. scan: {excel_dir}/{excel_name}-url-scan-log.csv
-  3. search: {excel_dir}/{excel_name}-search-log.csv
+  1. 输入Excel至少包含"期刊名称"列（必需）
+  2. 其他列（ISSN、eISSN、各种URL列等）为可选，会自动识别并输出
+  3. 根据 --include 参数，相应的 log 文件必须存在：
+     - extract: {excel_dir}/{excel_stem}-snapshot/extract-log.csv
+     - scan: {excel_dir}/{excel_name}-url-scan-log.csv
+     - search: {excel_dir}/{excel_name}-search-log.csv
         """
     )
     
@@ -629,9 +738,15 @@ def main():
         help='Sheet 名称或索引（默认 0，即第一个 sheet）'
     )
     parser.add_argument(
+        '--header-row',
+        type=int,
+        default=1,
+        help='表头所在行号（从1开始计数，默认为1）'
+    )
+    parser.add_argument(
         '--rows',
         required=True,
-        help='行范围，如 "2-99" 或 "2+"（从第2行开始到空行结束，第1行是表头）'
+        help='行范围，如 "3-1102" 或 "3+"（数据起始行到结束行，不包括表头）'
     )
     parser.add_argument(
         '--include',
@@ -668,6 +783,7 @@ def main():
     print("=" * 60)
     print(f"Excel 文件:    {args.input_excel}")
     print(f"Sheet 名称:    {args.sheet_name}")
+    print(f"表头行号:      {args.header_row}")
     print(f"行范围:        {args.rows}")
     print(f"包含方式:      {', '.join(sorted(include_methods))}")
     print("=" * 60)
@@ -739,7 +855,7 @@ def main():
     
     # 读取输入 Excel
     print(f"[COMBINE] 读取 Excel 数据...")
-    header_names, df = read_input_excel(excel_path, sheet_name, start_row, end_row)
+    header_names, df = read_input_excel(excel_path, sheet_name, args.header_row, start_row, end_row)
     print(f"[COMBINE] 读取到 {len(df)} 行数据")
     print()
     
