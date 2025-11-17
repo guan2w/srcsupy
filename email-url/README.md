@@ -1,6 +1,8 @@
 
 运行示例
 ```sh
+conda activate llmcall
+
 # 试跑 3 条
 python search_snapshot.py --input-file=/Users/eric/dev/working/email-url/emails.xlsx --sheet=Sheet1 --search-columns="G*" --rows=2-4
 
@@ -10,9 +12,22 @@ python search_snapshot.py --input-file=/Users/eric/dev/working/email-url/emails.
 python search_snapshot.py \
     --input-file=/Users/eric/dev/working/email-url/emails.xlsx \
     --sheet=Sheet1 \
-    --search-columns='G*' \
+    --search-columns="G*" \
     --rows=2+ \
     --debug
+
+
+# 合并
+python assemble.py \
+    --input-file=D:/dev/working/email-url-1117/emails.xlsx \
+    --sheet=Sheet1 \
+    --search-columns="G*" \
+    --rows=2+ \
+    --snapshot-prefix="http://192.168.51.109/snapshot/"
+
+# 合并
+python assemble.py --input-file=D:/dev/working/email-url-1117/emails.xlsx --sheet=Sheet1 --search-columns="G*" --rows=2+ --snapshot-prefix="http://192.168.51.109/snapshot/"
+
 ```
 
 ## 日志文件
