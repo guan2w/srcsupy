@@ -43,8 +43,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple, Any
 
 import requests
+import urllib3
 from openpyxl import load_workbook
 from scrapingbee import ScrapingBeeClient
+
+# 禁用 SSL 警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- toml 解析：兼容 3.11+ 的 tomllib 与 3.10 的 tomli ---
 try:
@@ -63,9 +67,9 @@ DEBUG = False
 search_cache_lock = threading.Lock()
 search_cache: Dict[str, Dict[str, Any]] = {}
 
-# 快照缓存：url -> relative_path
+# 快照缓存：url -> dict(snapshot_path, sheets, rows, keywords, error, time, is_direct, size)
 snapshot_cache_lock = threading.Lock()
-snapshot_cache: Dict[str, str] = {}
+snapshot_cache: Dict[str, Dict[str, Any]] = {}
 
 # 已完成行： (sheet_name, row_number)
 row_done_lock = threading.Lock()
@@ -81,15 +85,52 @@ failed_tasks = 0
 
 # ----------------- 工具函数 -----------------
 
-def debug_print(*args, **kwargs):
+# 任务上下文：用于在并行任务中传递任务信息
+class TaskContext:
+    def __init__(self, worker_id: int, task_index: int, total_tasks: int):
+        self.worker_id = worker_id
+        self.task_index = task_index
+        self.total_tasks = total_tasks
+    
+    def prefix(self) -> str:
+        """返回任务前缀"""
+        return f"#{self.worker_id} - [{self.task_index}/{self.total_tasks}]"
+
+
+def debug_print(*args, task_ctx: Optional[TaskContext] = None, **kwargs):
     if DEBUG:
-        print("[DEBUG]", *args, **kwargs)
+        now = dt.datetime.now().strftime("%H:%M:%S")
+        prefix = f"{task_ctx.prefix()} " if task_ctx else ""
+        print(f"[{now}] [DEBUG] {prefix}", *args, **kwargs)
 
 
-def log_print(*args, **kwargs):
+def log_print(*args, task_ctx: Optional[TaskContext] = None, **kwargs):
     """普通控制台输出，带时间前缀"""
-    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}]", *args, **kwargs)
+    now = dt.datetime.now().strftime("%H:%M:%S")
+    prefix = f"{task_ctx.prefix()} " if task_ctx else ""
+    print(f"[{now}] {prefix}", *args, **kwargs)
+
+
+def info_print(*args, task_ctx: Optional[TaskContext] = None, **kwargs):
+    """信息输出"""
+    now = dt.datetime.now().strftime("%H:%M:%S")
+    prefix = f"{task_ctx.prefix()} " if task_ctx else ""
+    print(f"[{now}] [INFO] {prefix}", *args, **kwargs)
+
+
+def error_print(*args, task_ctx: Optional[TaskContext] = None, **kwargs):
+    """错误输出"""
+    now = dt.datetime.now().strftime("%H:%M:%S")
+    prefix = f"{task_ctx.prefix()} " if task_ctx else ""
+    print(f"[{now}] [ERROR] {prefix}", *args, **kwargs)
+
+
+def progress_print(current: int, total: int, success: int, failed: int, task_ctx: Optional[TaskContext] = None):
+    """进度输出"""
+    now = dt.datetime.now().strftime("%H:%M:%S")
+    percentage = (current / total * 100) if total > 0 else 0
+    prefix = f"{task_ctx.prefix()} " if task_ctx else ""
+    print(f"[{now}] [进度] {prefix}{current}/{total} ({percentage:.1f}%) | 成功: {success} | 失败: {failed}")
 
 
 def load_env_file(path: str = ".env"):
@@ -124,6 +165,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         "timeout_seconds": 120,
         "concurrency": 1,
         "retry_times": 1,
+        "proxy": None,
     }
     if not os.path.exists(config_path):
         debug_print("config.toml 不存在，使用默认配置。")
@@ -215,7 +257,7 @@ def sha1_hex(text: str) -> str:
 
 # ----------------- ScrapingBee 调用 -----------------
 
-def search_google_once(api_key: str, keywords: str, language: str, timeout: int) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], float]:
+def search_google_once(api_key: str, keywords: str, language: str, timeout: int, proxies: Optional[Dict[str, str]] = None) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], float]:
     """
     调用一次 ScrapingBee Google Search。
     返回 (organic_results, error_message, duration_seconds)
@@ -229,7 +271,7 @@ def search_google_once(api_key: str, keywords: str, language: str, timeout: int)
     }
     start = time.monotonic()
     try:
-        response = requests.get(url, params=params, timeout=timeout)
+        response = requests.get(url, params=params, timeout=timeout, proxies=proxies)
         duration = time.monotonic() - start
         status = response.status_code
         if status != 200:
@@ -248,7 +290,7 @@ def search_google_once(api_key: str, keywords: str, language: str, timeout: int)
         return None, f"请求异常: {e}", duration
 
 
-def search_google_with_retry(api_key: str, keywords: str, language: str, timeout: int, retry_times: int) -> Tuple[List[Dict[str, Any]], str, float]:
+def search_google_with_retry(api_key: str, keywords: str, language: str, timeout: int, retry_times: int, proxies: Optional[Dict[str, str]] = None, task_ctx: Optional[TaskContext] = None) -> Tuple[List[Dict[str, Any]], str, float]:
     """
     带重试的搜索。
     返回 (organic_results_list, error_message, total_duration)
@@ -258,9 +300,12 @@ def search_google_with_retry(api_key: str, keywords: str, language: str, timeout
     last_error = ""
     attempts = 1 + max(retry_times, 0)
     for attempt in range(1, attempts + 1):
-        organic, err, dur = search_google_once(api_key, keywords, language, timeout)
+        organic, err, dur = search_google_once(api_key, keywords, language, timeout, proxies)
         total_duration += dur
-        log_print(f"[SEARCH] attempt={attempt}/{attempts} keywords={keywords!r} duration={dur:.3f}s error={err}")
+        if err is None:
+            log_print(f"[搜索] ✓ 成功 | 关键字: {keywords} | 耗时: {dur:.2f}s", task_ctx=task_ctx)
+        else:
+            log_print(f"[搜索] ✗ 失败 (尝试 {attempt}/{attempts}) | 关键字: {keywords} | 耗时: {dur:.2f}s | 错误: {err}", task_ctx=task_ctx)
         if err is None:
             return organic, "", total_duration
         last_error = err
@@ -269,7 +314,7 @@ def search_google_with_retry(api_key: str, keywords: str, language: str, timeout
     return [], last_error, total_duration
 
 
-def screenshot_once(client: ScrapingBeeClient, url: str, save_full_path: str, timeout: int) -> Optional[str]:
+def screenshot_once(client: ScrapingBeeClient, url: str, save_full_path: str, timeout: int, task_ctx: Optional[TaskContext] = None) -> Optional[str]:
     """
     截图一次；成功返回 None (表示无错误)，失败返回 error_message。
     """
@@ -285,7 +330,9 @@ def screenshot_once(client: ScrapingBeeClient, url: str, save_full_path: str, ti
             timeout=timeout,
         )
         duration = time.monotonic() - start
-        log_print(f"[SCREENSHOT] url={url} duration={duration:.3f}s status={getattr(response, 'status_code', 'N/A')}")
+        status = getattr(response, 'status_code', 'N/A')
+        file_size = len(getattr(response, "content", b""))
+        log_print(f"[截图] ✓ 成功 | URL: {url} | 状态: {status} | 大小: {file_size/1024:.1f}KB | 耗时: {duration:.2f}s", task_ctx=task_ctx)
         content = getattr(response, "content", None)
         if not content:
             return f"empty content for url={url}"
@@ -294,11 +341,11 @@ def screenshot_once(client: ScrapingBeeClient, url: str, save_full_path: str, ti
         return None
     except Exception as e:
         duration = time.monotonic() - start
-        log_print(f"[SCREENSHOT] url={url} duration={duration:.3f}s error={e}")
+        log_print(f"[截图] ✗ 失败 | URL: {url} | 耗时: {duration:.2f}s | 错误: {str(e)}", task_ctx=task_ctx)
         return f"exception for url={url}: {e}"
 
 
-def screenshot_with_retry(client: ScrapingBeeClient, url: str, save_full_path: str, timeout: int, retry_times: int) -> Tuple[bool, List[str]]:
+def screenshot_with_retry(client: ScrapingBeeClient, url: str, save_full_path: str, timeout: int, retry_times: int, task_ctx: Optional[TaskContext] = None) -> Tuple[bool, List[str]]:
     """
     带重试的截图。
     返回 (success, error_messages_list)
@@ -306,7 +353,7 @@ def screenshot_with_retry(client: ScrapingBeeClient, url: str, save_full_path: s
     errors: List[str] = []
     attempts = 1 + max(retry_times, 0)
     for attempt in range(1, attempts + 1):
-        err = screenshot_once(client, url, save_full_path, timeout)
+        err = screenshot_once(client, url, save_full_path, timeout, task_ctx)
         if err is None:
             return True, []
         errors.append(f"attempt {attempt}: {err}")
@@ -314,9 +361,81 @@ def screenshot_with_retry(client: ScrapingBeeClient, url: str, save_full_path: s
     return False, errors
 
 
-# ----------------- log.csv 相关 -----------------
+def is_direct_downloadable(url: str) -> bool:
+    """判断 URL 是否可直接下载（根据扩展名）"""
+    try:
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(url)
+        path = unquote(parsed.path).lower()
+        return any(path.endswith(ext) for ext in DIRECT_DOWNLOAD_EXTENSIONS)
+    except Exception:
+        return False
 
-LOG_HEADER = [
+
+def direct_download_once(url: str, save_full_path: str, timeout: int, proxies: Optional[Dict[str, str]] = None, task_ctx: Optional[TaskContext] = None) -> Tuple[Optional[int], Optional[str]]:
+    """
+    直接下载文件。
+    返回 (file_size_bytes, error_message)
+    error_message 为 None 表示成功。
+    """
+    start = time.monotonic()
+    try:
+        os.makedirs(os.path.dirname(save_full_path), exist_ok=True)
+        
+        # 设置浏览器请求头，避免 406 错误
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',  # 接受所有内容类型
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        # 关闭 SSL 验证以避免证书问题，允许重定向
+        response = requests.get(url, headers=headers, timeout=timeout, stream=True, verify=False, proxies=proxies, allow_redirects=True)
+        duration = time.monotonic() - start
+        
+        if response.status_code != 200:
+            log_print(f"[下载] ✗ 失败 | URL: {url} | 状态: {response.status_code} | 耗时: {duration:.2f}s", task_ctx=task_ctx)
+            return None, f"HTTP {response.status_code}"
+        
+        # 写入文件
+        file_size = 0
+        with open(save_full_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    file_size += len(chunk)
+        
+        duration = time.monotonic() - start
+        log_print(f"[下载] ✓ 成功 | URL: {url} | 大小: {file_size/1024:.1f}KB | 耗时: {duration:.2f}s", task_ctx=task_ctx)
+        return file_size, None
+    except Exception as e:
+        duration = time.monotonic() - start
+        log_print(f"[下载] ✗ 失败 | URL: {url} | 耗时: {duration:.2f}s | 错误: {str(e)}", task_ctx=task_ctx)
+        return None, f"下载异常: {e}"
+
+
+def direct_download_with_retry(url: str, save_full_path: str, timeout: int, retry_times: int, proxies: Optional[Dict[str, str]] = None, task_ctx: Optional[TaskContext] = None) -> Tuple[bool, Optional[int], List[str]]:
+    """
+    带重试的直接下载。
+    返回 (success, file_size_bytes, error_messages_list)
+    """
+    errors: List[str] = []
+    attempts = 1 + max(retry_times, 0)
+    for attempt in range(1, attempts + 1):
+        file_size, err = direct_download_once(url, save_full_path, timeout, proxies, task_ctx)
+        if err is None:
+            return True, file_size, []
+        errors.append(f"attempt {attempt}: {err}")
+        time.sleep(min(1.0 * attempt, 5.0))
+    return False, None, errors
+
+
+# ----------------- 日志文件相关 -----------------
+
+SEARCH_LOG_HEADER = [
     "sheet",
     "row",
     "keywords",
@@ -324,107 +443,157 @@ LOG_HEADER = [
     "search_duration_ms",
     "search_result_json",
     "search_error",
-    "snapshot_status",
-    "snapshot_errors",
     "url1",
-    "snapshot1_path",
     "url2",
-    "snapshot2_path",
     "url3",
-    "snapshot3_path",
 ]
 
+SNAPSHOT_LOG_HEADER = [
+    "url",
+    "sheets",
+    "rows",
+    "keywords",
+    "snapshot_path",
+    "snapshot_error",
+    "snapshot_time",
+    "is_direct_download",
+    "file_size_bytes",
+]
 
-def ensure_log_header(log_path: str):
-    """如果 log.csv 不存在，则创建并写入表头"""
+# 可直接下载的文件扩展名
+DIRECT_DOWNLOAD_EXTENSIONS = {
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.zip', '.png', '.jpg', '.jpeg', '.gif'
+}
+
+
+def ensure_log_header(log_path: str, header: List[str]):
+    """如果日志文件不存在，则创建并写入表头"""
     if not os.path.exists(log_path):
         with open(log_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(LOG_HEADER)
-        debug_print(f"创建 log 文件并写入 header: {log_path}")
+            writer.writerow(header)
+        debug_print(f"创建日志文件并写入表头: {log_path}")
 
 
-def load_existing_log(log_path: str, snapshot_root: str):
+def load_existing_logs(search_log_path: str, snapshot_log_path: str, snapshot_root: str):
     """
-    启动时读取已有 log.csv，更新：
-        - row_done_set
+    启动时读取已有的 search.csv 和 snapshot.csv，更新：
         - search_cache (按 keywords)
         - snapshot_cache (按 url)
+        - row_done_set
     """
-    if not os.path.exists(log_path):
-        debug_print("log.csv 不存在，无需恢复状态。")
-        return
-
-    with open(log_path, "r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            sheet_name = row.get("sheet", "")
-            row_no_str = row.get("row", "")
-            keywords = (row.get("keywords") or "").strip()
-            search_result_json = row.get("search_result_json") or ""
-            search_error = row.get("search_error") or ""
-            snapshot_status = row.get("snapshot_status") or ""
-            snapshot_errors = row.get("snapshot_errors") or ""
-            url1 = row.get("url1") or ""
-            url2 = row.get("url2") or ""
-            url3 = row.get("url3") or ""
-            snap1 = row.get("snapshot1_path") or ""
-            snap2 = row.get("snapshot2_path") or ""
-            snap3 = row.get("snapshot3_path") or ""
-
-            # 行完成判断
-            try:
-                row_no = int(row_no_str)
-            except ValueError:
-                row_no = None
-
-            # 解析 snapshot_status，如 "2/3"
-            done = False
-            if search_error == "":
-                if snapshot_status:
-                    parts = snapshot_status.split("/")
-                    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                        num_ok = int(parts[0])
-                        num_total = int(parts[1])
-                        if num_total == 0:
-                            # 没有 URL 也算完成
-                            done = True
-                        elif num_ok == num_total:
-                            done = True
-
-            if done and sheet_name and row_no is not None:
-                row_done_set.add((sheet_name, row_no))
-
-            # 搜索缓存
-            if keywords and search_result_json:
-                with search_cache_lock:
-                    if keywords not in search_cache:
-                        try:
-                            parsed = json.loads(search_result_json)
-                        except Exception:
-                            parsed = []
-                        search_cache[keywords] = {
-                            "results": parsed,
-                            "search_error": search_error,
-                        }
-
-            # 快照缓存：仅在文件真实存在时缓存
-            def maybe_add_snapshot(url: str, rel_path: str):
-                if not url or not rel_path:
-                    return
-                full_path = os.path.join(snapshot_root, rel_path)
-                if os.path.exists(full_path):
-                    with snapshot_cache_lock:
-                        if url not in snapshot_cache:
-                            snapshot_cache[url] = rel_path
-
-            maybe_add_snapshot(url1, snap1)
-            maybe_add_snapshot(url2, snap2)
-            maybe_add_snapshot(url3, snap3)
-
-    debug_print(f"恢复状态：{len(row_done_set)} 行已完成，"
-                f"{len(search_cache)} 个关键字已有搜索缓存，"
-                f"{len(snapshot_cache)} 条 URL 已有快照缓存。")
+    # 1. 读取 search.csv，恢复搜索缓存
+    search_rows: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    if os.path.exists(search_log_path):
+        with open(search_log_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                sheet_name = row.get("sheet", "")
+                row_no_str = row.get("row", "")
+                keywords = (row.get("keywords") or "").strip()
+                search_result_json = row.get("search_result_json") or ""
+                search_error = row.get("search_error") or ""
+                url1 = row.get("url1") or ""
+                url2 = row.get("url2") or ""
+                url3 = row.get("url3") or ""
+                
+                try:
+                    row_no = int(row_no_str)
+                except ValueError:
+                    continue
+                
+                # 保存该行信息，用于后续判断完成状态
+                search_rows[(sheet_name, row_no)] = {
+                    "keywords": keywords,
+                    "search_error": search_error,
+                    "urls": [url1, url2, url3],
+                }
+                
+                # 恢复搜索缓存
+                if keywords and search_result_json:
+                    with search_cache_lock:
+                        if keywords not in search_cache:
+                            try:
+                                parsed = json.loads(search_result_json)
+                            except Exception:
+                                parsed = []
+                            search_cache[keywords] = {
+                                "results": parsed,
+                                "search_error": search_error,
+                            }
+        debug_print(f"从 search.csv 恢复 {len(search_rows)} 行，{len(search_cache)} 个搜索缓存")
+    else:
+        debug_print("search.csv 不存在，无需恢复搜索状态。")
+    
+    # 2. 读取 snapshot.csv，恢复快照缓存
+    if os.path.exists(snapshot_log_path):
+        with open(snapshot_log_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                url = row.get("url", "")
+                sheets_str = row.get("sheets", "")
+                rows_str = row.get("rows", "")
+                keywords_str = row.get("keywords", "")
+                snapshot_path = row.get("snapshot_path", "")
+                snapshot_error = row.get("snapshot_error", "")
+                snapshot_time = row.get("snapshot_time", "")
+                is_direct = row.get("is_direct_download", "")
+                file_size_str = row.get("file_size_bytes", "")
+                
+                if not url:
+                    continue
+                
+                # 验证文件是否存在
+                if snapshot_path and not snapshot_error:
+                    full_path = os.path.join(snapshot_root, snapshot_path)
+                    if os.path.exists(full_path):
+                        with snapshot_cache_lock:
+                            if url not in snapshot_cache:
+                                try:
+                                    file_size = int(file_size_str) if file_size_str else 0
+                                except ValueError:
+                                    file_size = 0
+                                
+                                snapshot_cache[url] = {
+                                    "snapshot_path": snapshot_path,
+                                    "sheets": sheets_str.split("\n") if sheets_str else [],
+                                    "rows": rows_str.split("\n") if rows_str else [],
+                                    "keywords": keywords_str.split("\n") if keywords_str else [],
+                                    "snapshot_error": snapshot_error,
+                                    "snapshot_time": snapshot_time,
+                                    "is_direct_download": is_direct.lower() == "true",
+                                    "file_size_bytes": file_size,
+                                }
+        debug_print(f"从 snapshot.csv 恢复 {len(snapshot_cache)} 个快照缓存")
+    else:
+        debug_print("snapshot.csv 不存在，无需恢复快照状态。")
+    
+    # 3. 判断行完成状态
+    for (sheet_name, row_no), search_info in search_rows.items():
+        if search_info["search_error"]:
+            # 搜索失败，不算完成
+            continue
+        
+        urls = [u for u in search_info["urls"] if u]
+        if not urls:
+            # 没有 URL，算完成
+            row_done_set.add((sheet_name, row_no))
+            continue
+        
+        # 检查所有 URL 是否都有成功的快照
+        all_done = True
+        with snapshot_cache_lock:
+            for url in urls:
+                cached = snapshot_cache.get(url)
+                if not cached or cached.get("snapshot_error"):
+                    all_done = False
+                    break
+        
+        if all_done:
+            row_done_set.add((sheet_name, row_no))
+    
+    debug_print(f"恢复状态完成：{len(row_done_set)} 行已完成")
 
 
 # ----------------- 核心 worker -----------------
@@ -460,16 +629,20 @@ def process_row_task(
     api_key: str,
     cfg: Dict[str, Any],
     snapshot_root: str,
-    log_writer: csv.writer,
-    log_file,
-    log_lock: threading.Lock,
+    search_log_writer: csv.writer,
+    search_log_file,
+    search_log_lock: threading.Lock,
+    snapshot_log_writer: csv.writer,
+    snapshot_log_file,
+    snapshot_log_lock: threading.Lock,
+    task_ctx: Optional[TaskContext] = None,
 ):
     global finished_tasks, success_tasks, failed_tasks
 
-    # 1. 如果行已完成，直接跳过（一般不会，因为构建任务前已过滤），但这里再保险一次
+    # 1. 如果行已完成，直接跳过
     with row_done_lock:
         if (sheet_name, row_idx) in row_done_set:
-            debug_print(f"行已完成，跳过: {sheet_name}#{row_idx}")
+            debug_print(f"行已完成，跳过: {sheet_name}#{row_idx}", task_ctx=task_ctx)
             return
 
     # 2. 构造关键字
@@ -478,47 +651,45 @@ def process_row_task(
 
     if not keywords:
         msg = f"Sheet={sheet_name} Row={row_idx} 搜索列全为空，跳过此行。"
-        log_print(msg)
+        log_print(msg, task_ctx=task_ctx)
         search_time_iso = dt.datetime.now().astimezone().isoformat()
-        search_duration_ms = 0
-        search_result_json = ""
-        search_error = "empty keywords"
-        snapshot_status = "0/0"
-        snapshot_errors = ""
-        urls = ["", "", ""]
-        snapshot_paths = ["", "", ""]
-        # 写 log
-        with log_lock:
-            log_writer.writerow([
+        # 写入 search.csv
+        with search_log_lock:
+            search_log_writer.writerow([
                 sheet_name,
                 row_idx,
                 keywords,
                 search_time_iso,
-                search_duration_ms,
-                search_result_json,
-                search_error,
-                snapshot_status,
-                snapshot_errors,
-                urls[0],
-                snapshot_paths[0],
-                urls[1],
-                snapshot_paths[1],
-                urls[2],
-                snapshot_paths[2],
+                0,  # search_duration_ms
+                "",  # search_result_json
+                "empty keywords",  # search_error
+                "",  # url1
+                "",  # url2
+                "",  # url3
             ])
-            log_file.flush()
+            search_log_file.flush()
 
         with progress_lock:
             finished_tasks += 1
-            # 空行，算成功还是失败？这里算成功。
             success_tasks += 1
-            log_print(f"进度：{finished_tasks}/{total_tasks} 完成（成功 {success_tasks}, 失败 {failed_tasks}）")
+            progress_print(finished_tasks, total_tasks, success_tasks, failed_tasks, task_ctx=task_ctx)
+        
+        # 标记为完成
+        with row_done_lock:
+            row_done_set.add((sheet_name, row_idx))
         return
 
     # 3. 搜索（使用缓存 + 重试）
     timeout = int(cfg["timeout_seconds"])
     retry_times = int(cfg["retry_times"])
-    language = "en"  # 目前按照需求固定 en，后续如需配置可从 config 读取
+    language = "en"
+    proxy_url = cfg.get("proxy")
+    proxies = None
+    if proxy_url:
+        proxies = {
+            "http": proxy_url,
+            "https": proxy_url,
+        }
 
     # 搜索缓存检查
     with search_cache_lock:
@@ -529,7 +700,7 @@ def process_row_task(
         search_error = cached.get("search_error", "")
         search_duration_ms = 0
         search_time_iso = dt.datetime.now().astimezone().isoformat()
-        debug_print(f"使用已有搜索缓存：keywords={keywords!r}")
+        debug_print(f"使用已有搜索缓存：keywords={keywords!r}", task_ctx=task_ctx)
     else:
         search_time_iso = dt.datetime.now().astimezone().isoformat()
         organic_results, search_error, dur = search_google_with_retry(
@@ -538,6 +709,8 @@ def process_row_task(
             language=language,
             timeout=timeout,
             retry_times=retry_times,
+            proxies=proxies,
+            task_ctx=task_ctx,
         )
         search_duration_ms = int(dur * 1000)
         # 写入缓存
@@ -547,7 +720,7 @@ def process_row_task(
                 "search_error": search_error,
             }
 
-    # 转成 JSON 保存（仅保存 organic_results 部分）
+    # 转成 JSON 保存
     try:
         search_result_json = json.dumps(organic_results, ensure_ascii=False)
     except Exception:
@@ -561,69 +734,10 @@ def process_row_task(
             urls.append(str(url))
     while len(urls) < 3:
         urls.append("")
-
-    # 5. 截图（使用缓存 + 重试）
-    snapshot_paths = ["", "", ""]
-    snapshot_errors_list: List[str] = []
-
-    if search_error:
-        log_print(f"搜索失败（不会截图）：keywords={keywords!r} error={search_error}")
-        snapshot_status = "0/0"
-    else:
-        client = ScrapingBeeClient(api_key=api_key)
-        success_count = 0
-        total_urls = sum(1 for u in urls if u)
-
-        for idx, url in enumerate(urls):
-            if not url:
-                continue
-
-            # 快照缓存检查
-            with snapshot_cache_lock:
-                cached_path = snapshot_cache.get(url)
-
-            if cached_path:
-                # 确认文件依然存在
-                full_path = os.path.join(snapshot_root, cached_path)
-                if os.path.exists(full_path):
-                    snapshot_paths[idx] = cached_path
-                    success_count += 1
-                    debug_print(f"使用已有快照：url={url} path={cached_path}")
-                    continue
-                else:
-                    # 文件不存在了，缓存作废
-                    with snapshot_cache_lock:
-                        snapshot_cache.pop(url, None)
-
-            # 需要新拍一张
-            h = sha1_hex(url)
-            rel_path = os.path.join(h[:2], h[2:4], h[4:] + ".png")
-            full_path = os.path.join(snapshot_root, rel_path)
-
-            ok, errs = screenshot_with_retry(
-                client=client,
-                url=url,
-                save_full_path=full_path,
-                timeout=timeout,
-                retry_times=retry_times,
-            )
-            if ok:
-                snapshot_paths[idx] = rel_path
-                success_count += 1
-                # 更新缓存
-                with snapshot_cache_lock:
-                    snapshot_cache[url] = rel_path
-            else:
-                snapshot_paths[idx] = ""
-                snapshot_errors_list.extend(errs)
-
-        snapshot_status = f"{success_count}/{total_urls}"
-
-    snapshot_errors = "\n\n".join(snapshot_errors_list)
-
-    # 6. 写 log
-    with log_lock:
-        log_writer.writerow([
+    
+    # 5. 写入 search.csv
+    with search_log_lock:
+        search_log_writer.writerow([
             sheet_name,
             row_idx,
             keywords,
@@ -631,30 +745,160 @@ def process_row_task(
             search_duration_ms,
             search_result_json,
             search_error,
-            snapshot_status,
-            snapshot_errors,
             urls[0],
-            snapshot_paths[0],
             urls[1],
-            snapshot_paths[1],
             urls[2],
-            snapshot_paths[2],
         ])
-        log_file.flush()
+        search_log_file.flush()
+
+    # 6. 处理快照（如果搜索失败，则跳过）
+    has_errors = False
+    if search_error:
+        log_print(f"[跳过] 搜索失败，不进行快照 | 关键字: {keywords} | 错误: {search_error}", task_ctx=task_ctx)
+        has_errors = True
+    else:
+        # 创建 ScrapingBee 客户端（代理已通过环境变量设置）
+        client = ScrapingBeeClient(api_key=api_key)
+        
+        for url in urls:
+            if not url:
+                continue
+            
+            # 检查快照缓存
+            with snapshot_cache_lock:
+                cached = snapshot_cache.get(url)
+            
+            if cached and not cached.get("snapshot_error"):
+                # 已有成功的快照，追加 sheets/rows/keywords
+                debug_print(f"使用已有快照：url={url}")
+                
+                # 验证文件存在
+                snapshot_path = cached["snapshot_path"]
+                full_path = os.path.join(snapshot_root, snapshot_path)
+                if os.path.exists(full_path):
+                    # 追加当前的 sheet/row/keywords（去重）
+                    sheets_set = set(cached["sheets"])
+                    rows_set = set(cached["rows"])
+                    keywords_set = set(cached["keywords"])
+                    
+                    sheets_set.add(sheet_name)
+                    rows_set.add(str(row_idx))
+                    keywords_set.add(keywords)
+                    
+                    # 更新缓存
+                    with snapshot_cache_lock:
+                        snapshot_cache[url]["sheets"] = sorted(sheets_set)
+                        snapshot_cache[url]["rows"] = sorted(rows_set, key=lambda x: int(x) if x.isdigit() else 0)
+                        snapshot_cache[url]["keywords"] = sorted(keywords_set)
+                    
+                    # 重新写入整个 snapshot.csv（需要读取所有记录并更新）
+                    # 注：为了简化，我们只追加新记录或更新现有记录
+                    # 这里我们采用追加方式，后续可以优化为定期合并去重
+                    continue
+                else:
+                    # 文件不存在，缓存作废，需要重新下载
+                    with snapshot_cache_lock:
+                        snapshot_cache.pop(url, None)
+            
+            # 需要新建快照
+            h = sha1_hex(url)
+            is_direct = is_direct_downloadable(url)
+            
+            # 根据文件类型选择扩展名
+            if is_direct:
+                # 尝试从 URL 中提取扩展名
+                from urllib.parse import urlparse, unquote
+                try:
+                    parsed = urlparse(url)
+                    path = unquote(parsed.path)
+                    ext = os.path.splitext(path)[1].lower()
+                    if not ext or ext not in DIRECT_DOWNLOAD_EXTENSIONS:
+                        ext = ".pdf"  # 默认
+                except Exception:
+                    ext = ".pdf"
+            else:
+                ext = ".png"
+            
+            rel_path = os.path.join(h[:2], h[2:4], h[4:] + ext)
+            full_path = os.path.join(snapshot_root, rel_path)
+            
+            snapshot_time = dt.datetime.now().astimezone().isoformat()
+            
+            if is_direct:
+                # 直接下载
+                ok, file_size, errs = direct_download_with_retry(
+                    url=url,
+                    save_full_path=full_path,
+                    timeout=timeout,
+                    retry_times=retry_times,
+                    proxies=proxies,
+                    task_ctx=task_ctx,
+                )
+            else:
+                # 使用 ScrapingBee 截图
+                ok, errs = screenshot_with_retry(
+                    client=client,
+                    url=url,
+                    save_full_path=full_path,
+                    timeout=timeout,
+                    retry_times=retry_times,
+                    task_ctx=task_ctx,
+                )
+                if ok:
+                    # 获取文件大小
+                    try:
+                        file_size = os.path.getsize(full_path)
+                    except Exception:
+                        file_size = 0
+                else:
+                    file_size = 0
+            
+            if ok:
+                snapshot_error = ""
+            else:
+                snapshot_error = "; ".join(errs)
+                has_errors = True
+            
+            # 写入 snapshot.csv
+            with snapshot_log_lock:
+                snapshot_log_writer.writerow([
+                    url,
+                    sheet_name,
+                    str(row_idx),
+                    keywords,
+                    rel_path if ok else "",
+                    snapshot_error,
+                    snapshot_time if ok else "",
+                    "true" if is_direct else "false",
+                    str(file_size) if ok else "",
+                ])
+                snapshot_log_file.flush()
+            
+            # 更新缓存
+            if ok:
+                with snapshot_cache_lock:
+                    snapshot_cache[url] = {
+                        "snapshot_path": rel_path,
+                        "sheets": [sheet_name],
+                        "rows": [str(row_idx)],
+                        "keywords": [keywords],
+                        "snapshot_error": "",
+                        "snapshot_time": snapshot_time,
+                        "is_direct_download": is_direct,
+                        "file_size_bytes": file_size,
+                    }
 
     # 7. 更新进度与完成标记
-    is_success = (search_error == "" and not snapshot_errors_list)
-
     with progress_lock:
         finished_tasks += 1
-        if is_success:
+        if not has_errors:
             success_tasks += 1
         else:
             failed_tasks += 1
-        log_print(f"进度：{finished_tasks}/{total_tasks} 完成（成功 {success_tasks}, 失败 {failed_tasks}）")
+        progress_print(finished_tasks, total_tasks, success_tasks, failed_tasks, task_ctx=task_ctx)
 
     # 将已完成的行加入 row_done_set（仅在无错误时）
-    if is_success:
+    if not has_errors:
         with row_done_lock:
             row_done_set.add((sheet_name, row_idx))
 
@@ -676,14 +920,15 @@ def main():
 
     input_path = os.path.abspath(args.input_file)
     if not os.path.exists(input_path):
-        log_print(f"输入文件不存在：{input_path}")
+        error_print(f"输入文件不存在: {input_path}")
         sys.exit(1)
 
     base_dir = os.path.dirname(input_path)
     base_name = os.path.splitext(os.path.basename(input_path))[0]
 
     snapshot_root = os.path.join(base_dir, f"{base_name}-snapshot")
-    log_path = os.path.join(base_dir, f"{base_name}.log.csv")
+    search_log_path = os.path.join(base_dir, f"{base_name}.search.csv")
+    snapshot_log_path = os.path.join(base_dir, f"{base_name}.snapshot.csv")
     
     # 配置文件查找顺序：1. 脚本所在目录 2. 输入文件所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -691,18 +936,31 @@ def main():
     if not os.path.exists(config_path):
         config_path = os.path.join(base_dir, "config.toml")
 
-    log_print(f"Input file: {input_path}")
-    log_print(f"Snapshot dir: {snapshot_root}")
-    log_print(f"Log file: {log_path}")
-    log_print(f"Config file: {config_path}")
+    info_print("=" * 70)
+    info_print("配置信息")
+    info_print(f"  输入文件: {input_path}")
+    info_print(f"  快照目录: {snapshot_root}")
+    info_print(f"  搜索日志: {search_log_path}")
+    info_print(f"  快照日志: {snapshot_log_path}")
+    info_print(f"  配置文件: {config_path}")
+    info_print("=" * 70)
 
     # 1. 加载 .env 和配置
     load_env_file(".env")
     cfg = load_config(config_path)
+    
+    proxy_url = cfg.get("proxy")
+    if proxy_url:
+        # 设置环境变量，使 ScrapingBee 客户端也能使用代理
+        os.environ["HTTP_PROXY"] = proxy_url
+        os.environ["HTTPS_PROXY"] = proxy_url
+        info_print(f"代理设置: {proxy_url}")
+    else:
+        debug_print("未配置代理")
 
     api_key = os.environ.get("SCRAPINGBEE_API_KEY", "").strip()
     if not api_key:
-        log_print("错误：未找到 SCRAPINGBEE_API_KEY，请在 .env 或环境变量中设置。")
+        error_print("未找到 SCRAPINGBEE_API_KEY，请在 .env 或环境变量中设置。")
         sys.exit(1)
 
     # 2. 解析 search-columns
@@ -710,30 +968,31 @@ def main():
         columns_spec = parse_search_columns(args.search_columns)
         debug_print("columns_spec =", columns_spec)
     except Exception as e:
-        log_print("解析 search-columns 出错：", e)
+        error_print(f"解析 search-columns 出错: {e}")
         sys.exit(1)
 
     # 3. 打开 Excel
     wb = load_workbook(input_path, read_only=True, data_only=True)
     if args.sheet not in wb.sheetnames:
-        log_print("错误：Excel 中未找到 sheet：", args.sheet)
-        log_print("可用 sheet:", wb.sheetnames)
+        error_print(f"Excel 中未找到 sheet: {args.sheet}")
+        info_print(f"可用 sheet: {', '.join(wb.sheetnames)}")
         sys.exit(1)
     ws = wb[args.sheet]
     max_row = ws.max_row
-    log_print(f"Sheet '{args.sheet}' 最大行号为 {max_row}")
+    info_print(f"Sheet '{args.sheet}' 最大行号: {max_row}")
 
     # 4. 解析 rows 范围
     try:
         start_row, end_row = parse_rows_spec(args.rows, max_row)
     except Exception as e:
-        log_print("解析 rows 参数出错：", e)
+        error_print(f"解析 rows 参数出错: {e}")
         sys.exit(1)
-    log_print(f"处理行范围：{start_row}-{end_row}")
+    info_print(f"处理行范围: {start_row}-{end_row}")
 
-    # 5. 准备 log 文件 & 恢复状态
-    ensure_log_header(log_path)
-    load_existing_log(log_path, snapshot_root)
+    # 5. 准备日志文件 & 恢复状态
+    ensure_log_header(search_log_path, SEARCH_LOG_HEADER)
+    ensure_log_header(snapshot_log_path, SNAPSHOT_LOG_HEADER)
+    load_existing_logs(search_log_path, snapshot_log_path, snapshot_root)
 
     # 6. 构建任务列表（仅未完成的行）
     tasks: List[int] = []
@@ -746,37 +1005,73 @@ def main():
 
     total_tasks = len(tasks)
     if total_tasks == 0:
-        log_print("指定范围内的行已全部处理完成，无任务可执行。")
+        info_print("指定范围内的行已全部处理完成，无任务可执行。")
         return
 
-    log_print(f"总任务数：{total_tasks}")
+    info_print("=" * 70)
+    info_print(f"开始处理 | 总任务数: {total_tasks}")
+    info_print("=" * 70)
 
-    # 7. 打开 log 文件（append 模式），初始化 writer
-    log_lock = threading.Lock()
-    with open(log_path, "a", newline="", encoding="utf-8") as log_file:
-        log_writer = csv.writer(log_file)
+    # 7. 打开日志文件（append 模式），初始化 writer
+    search_log_lock = threading.Lock()
+    snapshot_log_lock = threading.Lock()
+    
+    with open(search_log_path, "a", newline="", encoding="utf-8") as search_log_file, \
+         open(snapshot_log_path, "a", newline="", encoding="utf-8") as snapshot_log_file:
+        
+        search_log_writer = csv.writer(search_log_file)
+        snapshot_log_writer = csv.writer(snapshot_log_file)
 
         # 8. 并发执行
         concurrency = int(cfg["concurrency"])
         if concurrency < 1:
             concurrency = 1
-        log_print(f"并发线程数：{concurrency}")
+        info_print(f"并发线程数: {concurrency}")
+        info_print("")
 
+        # 为每个任务创建任务上下文
+        task_contexts = {}
+        for idx, row_idx in enumerate(tasks, start=1):
+            # worker_id 会在任务执行时动态分配（使用线程ID）
+            # 这里先创建上下文，worker_id 会在任务开始时设置
+            task_contexts[row_idx] = TaskContext(worker_id=0, task_index=idx, total_tasks=total_tasks)
+        
+        # 用于分配 worker_id 的计数器
+        worker_id_counter = 0
+        worker_id_lock = threading.Lock()
+        
+        def create_task_with_context(row_idx):
+            """创建带任务上下文的任务包装函数"""
+            nonlocal worker_id_counter
+            # 获取 worker_id
+            with worker_id_lock:
+                worker_id_counter += 1
+                worker_id = worker_id_counter
+            
+            # 更新任务上下文的 worker_id
+            task_ctx = task_contexts[row_idx]
+            task_ctx.worker_id = worker_id
+            
+            return process_row_task(
+                args.sheet,
+                row_idx,
+                ws,
+                columns_spec,
+                api_key,
+                cfg,
+                snapshot_root,
+                search_log_writer,
+                search_log_file,
+                search_log_lock,
+                snapshot_log_writer,
+                snapshot_log_file,
+                snapshot_log_lock,
+                task_ctx=task_ctx,
+            )
+        
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             future_to_row = {
-                executor.submit(
-                    process_row_task,
-                    args.sheet,
-                    row_idx,
-                    ws,
-                    columns_spec,
-                    api_key,
-                    cfg,
-                    snapshot_root,
-                    log_writer,
-                    log_file,
-                    log_lock,
-                ): row_idx
+                executor.submit(create_task_with_context, row_idx): row_idx
                 for row_idx in tasks
             }
 
@@ -786,10 +1081,16 @@ def main():
                 try:
                     future.result()
                 except Exception as e:
-                    log_print(f"行 {row_idx} 处理过程中出现未捕获异常：{e}")
+                    task_ctx = task_contexts.get(row_idx)
+                    error_print(f"行 {row_idx} 处理过程中出现未捕获异常: {e}", task_ctx=task_ctx)
 
-    log_print("全部任务执行完毕。")
-    log_print(f"最终统计：总任务 {total_tasks}，成功 {success_tasks}，失败 {failed_tasks}")
+    info_print("")
+    info_print("=" * 70)
+    info_print("任务完成")
+    info_print(f"  总任务: {total_tasks}")
+    info_print(f"  成功: {success_tasks}")
+    info_print(f"  失败: {failed_tasks}")
+    info_print("=" * 70)
 
 
 if __name__ == "__main__":
