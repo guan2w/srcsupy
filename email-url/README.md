@@ -27,6 +27,11 @@ python assemble.py \
 
 python assemble.py --input-file=/Users/eric/dev/working/email-url/emails.xlsx --sheet=Sheet1 --search-columns="G*" --rows=2+ --snapshot-prefix="http://192.168.51.109/snapshot/"
 
+
+# 11.18 4k 条
+python search_snapshot.py --input-file=/Users/eric/dev/working/email-url/emails1118.xlsx --sheet="待清理网页&快照" --search-columns="H*" --rows=2-4
+
+
 ```
 
 ## 日志文件
