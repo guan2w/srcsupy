@@ -25,6 +25,8 @@ python assemble.py \
     --rows=2+ \
     --snapshot-prefix="http://192.168.51.109/snapshot/"
 
+python assemble.py --input-file=/Users/eric/dev/working/email-url/emails.xlsx --sheet=Sheet1 --search-columns="G*" --rows=2+ --snapshot-prefix="http://192.168.51.109/snapshot/"
+
 ```
 
 ## 日志文件
