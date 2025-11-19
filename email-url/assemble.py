@@ -52,15 +52,18 @@ def parse_search_columns(spec):
         result.append((col_index, exact))
     return result
 
-def build_keywords(ws, row_idx, columns_spec):
+def build_keywords(row_values, columns_spec):
     """从Excel行构建关键词"""
     parts = []
     for col_index, exact in columns_spec:
-        value = ws.cell(row=row_idx, column=col_index).value
-        if value is None: continue
-        s = str(value).replace("\n", " ").strip()
-        if not s: continue
-        parts.append(f'"{s}"' if exact else s)
+        # col_index 是 1-based，row_values 是 0-based tuple
+        idx = col_index - 1
+        if idx < len(row_values):
+            value = row_values[idx]
+            if value is None: continue
+            s = str(value).replace("\n", " ").strip()
+            if not s: continue
+            parts.append(f'"{s}"' if exact else s)
     return " ".join(parts).strip()
 
 def calculate_snapshot_status(search_result_json, urls, snapshot_data):
@@ -165,10 +168,18 @@ def main():
 
     print(f"开始处理 {data_row_count} 行数据...")
 
+    # 使用 iter_rows 优化读取性能
+    row_iterator = input_ws.iter_rows(min_row=start_row, max_row=end_row, values_only=True)
+
     # 处理每一行
-    for row_idx in range(start_row, end_row + 1):
+    for i, row_values in enumerate(row_iterator):
+        row_idx = start_row + i
         processed_count += 1
-        keywords = build_keywords(input_ws, row_idx, columns_spec)
+        
+        if processed_count % 100 == 0:
+            print(f"正在处理第 {processed_count}/{data_row_count} 行...", end="\r")
+
+        keywords = build_keywords(row_values, columns_spec)
 
         if DEBUG: print(f"第 {row_idx} 行关键词: '{keywords}'")
 
