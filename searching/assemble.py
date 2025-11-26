@@ -147,34 +147,43 @@ def extract_template_variables(template: str) -> List[str]:
 
 
 def read_header_mapping(ws, header_row: int) -> Dict[str, int]:
-    """读取表头，返回列名到列索引的映射"""
+    """读取表头，返回列名到列索引的映射（列索引从 0 开始，适配 iter_rows）"""
     header_map = {}
     for col in range(1, ws.max_column + 1):
         cell_value = ws.cell(row=header_row, column=col).value
         if cell_value:
-            header_map[str(cell_value).strip()] = col
+            # 存储 0-based 索引，适配 iter_rows 返回的 tuple
+            header_map[str(cell_value).strip()] = col - 1
     return header_map
 
 
-def render_template(template: str, row_data: Dict[str, Any]) -> str:
-    """根据行数据渲染模板"""
-    result = template
-    for key, value in row_data.items():
-        placeholder = "{{" + key + "}}"
-        if placeholder in result:
-            str_value = str(value).strip() if value is not None else ""
-            result = result.replace(placeholder, str_value)
-    return result.strip()
+# 预编译模板正则，用于快速渲染
+_TEMPLATE_PATTERN = re.compile(r'\{\{(\w+)\}\}')
 
 
-def read_row_data(ws, row_idx: int, header_map: Dict[str, int], variables: List[str]) -> Dict[str, Any]:
-    """读取指定行的数据"""
+def render_template_fast(template: str, row_data: Dict[str, Any], pattern: re.Pattern = _TEMPLATE_PATTERN) -> str:
+    """根据行数据渲染模板（优化版：正则一次替换）"""
+    def replacer(match):
+        key = match.group(1)
+        value = row_data.get(key)
+        return str(value).strip() if value is not None else ""
+    return pattern.sub(replacer, template).strip()
+
+
+def build_var_indices(header_map: Dict[str, int], variables: List[str]) -> List[Tuple[str, Optional[int]]]:
+    """
+    预计算变量到列索引的映射
+    返回: [(变量名, 列索引或None), ...]
+    """
+    return [(var, header_map.get(var)) for var in variables]
+
+
+def extract_row_data(row_tuple: tuple, var_indices: List[Tuple[str, Optional[int]]]) -> Dict[str, Any]:
+    """从行元组中提取变量数据（优化版：使用预计算的索引）"""
     row_data = {}
-    for var in variables:
-        if var in header_map:
-            col_idx = header_map[var]
-            cell_value = ws.cell(row=row_idx, column=col_idx).value
-            row_data[var] = cell_value
+    for var, col_idx in var_indices:
+        if col_idx is not None and col_idx < len(row_tuple):
+            row_data[var] = row_tuple[col_idx]
         else:
             row_data[var] = ""
     return row_data
@@ -355,30 +364,47 @@ def main():
     wb_read = load_workbook(input_path, read_only=True, data_only=True)
     ws_read = wb_read[args.sheet_name]
     
-    # 重新获取表头映射
+    # 重新获取表头映射（0-based 索引）
     header_map = read_header_mapping(ws_read, args.header_row)
     
-    # 处理每一行
+    # 预计算变量列索引（避免每行都查找）
+    var_indices = build_var_indices(header_map, variables)
+    
+    # 预计算字段名列表（避免循环内重复解包）
+    field_names = [field_name for _, field_name in columns_spec]
+    num_fields = len(field_names)
+    
+    # 批量读取所有数据行到内存（核心优化）
+    log_print("正在批量读取 Excel 数据...")
+    all_rows = list(ws_read.iter_rows(
+        min_row=start_row,
+        max_row=end_row,
+        values_only=True
+    ))
+    log_print(f"已读取 {len(all_rows)} 行数据到内存")
+    
+    # 处理每一行并收集写入数据
     matched_count = 0
     not_found_count = 0
+    write_batch = []  # 收集所有写入操作: (row_idx, col_idx, value)
     
-    for row_idx in range(start_row, end_row + 1):
-        # 读取行数据并渲染查询词
-        row_data = read_row_data(ws_read, row_idx, header_map, variables)
-        query = render_template(template, row_data)
+    col_offset = original_max_col + 1
+    
+    for idx, row_tuple in enumerate(all_rows):
+        row_idx = start_row + idx
         
-        if not query.strip():
+        # 从行元组中提取变量数据
+        row_data = extract_row_data(row_tuple, var_indices)
+        query = render_template_fast(template, row_data)
+        
+        if not query:
             if args.debug:
                 log_print(f"行 {row_idx} 渲染后为空，跳过", level="DEBUG")
             not_found_count += 1
             continue
         
-        # 查找搜索结果
-        results = search_data.get(query, [])
-        
-        # 根据 exclude_url_pattern 过滤结果
-        if exclude_regex and results:
-            results = [r for r in results if not exclude_regex.search(r.get("url", ""))]
+        # 查找搜索结果（O(1) 字典查找）
+        results = search_data.get(query)
         
         if not results:
             if args.debug:
@@ -386,22 +412,35 @@ def main():
             not_found_count += 1
             continue
         
+        # 根据 exclude_url_pattern 过滤结果
+        if exclude_regex:
+            results = [r for r in results if not exclude_regex.search(r.get("url", ""))]
+            if not results:
+                if args.debug:
+                    log_print(f"行 {row_idx} 结果被排除: {query[:40]}...", level="DEBUG")
+                not_found_count += 1
+                continue
+        
         matched_count += 1
         
-        # 填充新列数据（顺序 A：按结果分组）
-        col_offset = original_max_col + 1
-        for result_idx in range(args.top_n):
-            for field_idx, (_, field_name) in enumerate(columns_spec):
-                col_idx = col_offset + result_idx * len(columns_spec) + field_idx
-                
-                if result_idx < len(results):
-                    value = results[result_idx].get(field_name, "")
-                    ws_write.cell(row=row_idx, column=col_idx, value=value)
+        # 收集写入数据（延迟写入，提升性能）
+        for result_idx in range(min(args.top_n, len(results))):
+            result = results[result_idx]
+            base_col = col_offset + result_idx * num_fields
+            for field_idx, field_name in enumerate(field_names):
+                value = result.get(field_name, "")
+                if value:  # 只收集非空值
+                    write_batch.append((row_idx, base_col + field_idx, value))
         
         # 进度显示
-        if (row_idx - start_row + 1) % 100 == 0:
-            progress = (row_idx - start_row + 1) / total_rows * 100
-            log_print(f"处理进度: {row_idx - start_row + 1}/{total_rows} ({progress:.1f}%)")
+        if (idx + 1) % 500 == 0:
+            progress = (idx + 1) / total_rows * 100
+            log_print(f"处理进度: {idx + 1}/{total_rows} ({progress:.1f}%)")
+    
+    # 批量写入 Excel
+    log_print(f"正在批量写入 {len(write_batch)} 个单元格...")
+    for row_idx, col_idx, value in write_batch:
+        ws_write.cell(row=row_idx, column=col_idx, value=value)
     
     # 调整列宽
     for i, header in enumerate(new_headers):
