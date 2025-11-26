@@ -23,6 +23,7 @@ import csv
 import datetime as dt
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -126,8 +127,8 @@ def parse_url_columns(spec: str) -> List[str]:
 
 # ==================== Excel 处理 ====================
 
-def read_extract_rules(wb, rules_sheet: str = "ai_extract_rules") -> Dict[str, str]:
-    """从 ai_extract_rules sheet 的 A1 单元格读取提取规则（JSON）"""
+def read_extract_rules_template(wb, rules_sheet: str = "ai_extract_rules") -> str:
+    """从 ai_extract_rules sheet 的 A1 单元格读取提取规则模板（JSON 字符串）"""
     if rules_sheet not in wb.sheetnames:
         raise ValueError(f"未找到 ai_extract_rules sheet: {rules_sheet}")
     
@@ -137,13 +138,48 @@ def read_extract_rules(wb, rules_sheet: str = "ai_extract_rules") -> Dict[str, s
     if not rules_json:
         raise ValueError("ai_extract_rules sheet A1 单元格为空")
     
+    # 验证 JSON 格式
+    rules_str = str(rules_json).strip()
     try:
-        rules = json.loads(str(rules_json).strip())
+        rules = json.loads(rules_str)
         if not isinstance(rules, dict):
             raise ValueError("提取规则必须是 JSON 对象")
-        return rules
     except json.JSONDecodeError as e:
         raise ValueError(f"提取规则 JSON 解析失败: {e}")
+    
+    return rules_str
+
+
+def extract_template_variables(template: str) -> List[str]:
+    """从模板中提取变量名，如 {{姓名}} 中的 '姓名'"""
+    pattern = r'\{\{(\w+)\}\}'
+    return list(set(re.findall(pattern, template)))
+
+
+def render_rules_template(template: str, row_data: Dict[str, Any]) -> Dict[str, str]:
+    """根据行数据渲染提取规则模板"""
+    result = template
+    for key, value in row_data.items():
+        placeholder = "{{" + key + "}}"
+        if placeholder in result:
+            str_value = str(value).strip() if value is not None else ""
+            result = result.replace(placeholder, str_value)
+    
+    # 解析渲染后的 JSON
+    return json.loads(result)
+
+
+def read_row_data(ws, row_idx: int, header_map: Dict[str, int], variables: List[str]) -> Dict[str, Any]:
+    """读取指定行的数据（仅读取模板需要的变量）"""
+    row_data = {}
+    for var in variables:
+        if var in header_map:
+            col_idx = header_map[var]
+            cell_value = ws.cell(row=row_idx, column=col_idx).value
+            row_data[var] = cell_value
+        else:
+            row_data[var] = ""
+    return row_data
 
 
 def read_header_mapping(ws, header_row: int) -> Dict[str, int]:
@@ -158,6 +194,38 @@ def read_header_mapping(ws, header_row: int) -> Dict[str, int]:
 
 # ==================== ScrapingBee AI Extract ====================
 
+# ScrapingBee timeout 限制：1000-141000 毫秒
+SCRAPINGBEE_MAX_TIMEOUT_MS = 141000
+SCRAPINGBEE_MAX_TIMEOUT_SEC = 141
+
+
+def decode_unicode_string(s: str) -> str:
+    """解码 Unicode 转义字符串，如 \\u7f51\\u9875 -> 网页"""
+    if not isinstance(s, str):
+        return s
+    try:
+        # 检测是否包含 Unicode 转义序列
+        if '\\u' in s:
+            return s.encode('utf-8').decode('unicode_escape')
+        return s
+    except:
+        return s
+
+
+def decode_unicode_keys(data: Any) -> Any:
+    """递归解码字典中所有 Unicode 转义的 key 和 value"""
+    if isinstance(data, dict):
+        return {
+            decode_unicode_string(k): decode_unicode_keys(v)
+            for k, v in data.items()
+        }
+    elif isinstance(data, list):
+        return [decode_unicode_keys(item) for item in data]
+    elif isinstance(data, str):
+        return decode_unicode_string(data)
+    return data
+
+
 def extract_from_url(
     client: ScrapingBeeClient,
     url: str,
@@ -168,15 +236,19 @@ def extract_from_url(
     调用 ScrapingBee AI Extract 接口
     返回: (提取结果字典, 错误信息, 耗时秒数)
     """
+    # 限制 timeout 不超过 ScrapingBee API 限制
+    api_timeout_sec = min(timeout, SCRAPINGBEE_MAX_TIMEOUT_SEC)
+    api_timeout_ms = api_timeout_sec * 1000
+    
     start = time.monotonic()
     try:
         response = client.get(
             url,
             params={
                 "ai_extract_rules": rules,
-                "timeout": timeout * 1000  # ScrapingBee 使用毫秒
+                "timeout": api_timeout_ms
             },
-            timeout=timeout + 30  # 留出额外时间
+            timeout=api_timeout_sec + 30  # 留出额外时间
         )
         duration = time.monotonic() - start
         
@@ -185,12 +257,16 @@ def extract_from_url(
             return None, f"HTTP {response.status_code}: {response.text[:500]}", duration
         
         # 解析 JSON 响应
+        response_text = response.text if hasattr(response, 'text') else response.content.decode('utf-8')
+        
         try:
-            data = response.json()
+            # 直接用 json.loads 解析（自动处理 Unicode 转义）
+            data = json.loads(response_text)
+            # 额外处理可能残留的 Unicode 转义
+            data = decode_unicode_keys(data)
             return data, None, duration
-        except json.JSONDecodeError:
-            # 有时返回的是纯文本
-            return None, f"响应不是有效 JSON: {response.text[:500]}", duration
+        except json.JSONDecodeError as e:
+            return None, f"JSON 解析失败: {e}. 响应内容: {response_text[:500]}", duration
             
     except Exception as e:
         return None, f"请求异常: {e}", time.monotonic() - start
@@ -226,7 +302,7 @@ def retry_extract(
 
 def get_log_header(rules: Dict[str, str]) -> List[str]:
     """生成日志文件表头"""
-    base_header = ["url", "url_column", "row_number", "extract_time", "duration_ms", "SUCCESS", "ERROR"]
+    base_header = ["url_column", "row_number", "url", "ai_extract_rules", "extract_time", "duration_ms", "SUCCESS", "ERROR"]
     # 添加提取规则中的字段
     rule_fields = list(rules.keys())
     return base_header + rule_fields
@@ -263,6 +339,7 @@ def write_extract_result(
     url: str,
     url_column: str,
     row_number: int,
+    rules_used: Dict[str, str],
     extract_time: str,
     duration_ms: int,
     result: Optional[Dict],
@@ -270,10 +347,14 @@ def write_extract_result(
     rule_fields: List[str]
 ):
     """写入提取结果到日志"""
+    # 将使用的规则序列化为 JSON 字符串
+    rules_json = json.dumps(rules_used, ensure_ascii=False)
+    
     row_data = [
-        url,
         url_column,
         row_number,
+        url,
+        rules_json,
         extract_time,
         duration_ms,
         "true" if error is None else "false",
@@ -329,6 +410,11 @@ def main():
     # 加载配置
     cfg = load_config(config_path)
     
+    # 检查并限制 timeout（ScrapingBee API 限制 1-141 秒）
+    if cfg["timeout_seconds"] > SCRAPINGBEE_MAX_TIMEOUT_SEC:
+        log_print(f"timeout_seconds={cfg['timeout_seconds']} 超过 ScrapingBee 限制，自动调整为 {SCRAPINGBEE_MAX_TIMEOUT_SEC} 秒", level="WARN")
+        cfg["timeout_seconds"] = SCRAPINGBEE_MAX_TIMEOUT_SEC
+    
     # 并发数优先使用命令行参数
     concurrency = args.concurrency if args.concurrency > 0 else cfg["concurrency"]
     concurrency = max(1, concurrency)
@@ -363,10 +449,17 @@ def main():
     log_print("正在加载 Excel 文件...")
     wb = load_workbook(input_path, read_only=True, data_only=True)
     
-    # 读取提取规则
-    rules = read_extract_rules(wb)
-    rule_fields = list(rules.keys())
+    # 读取提取规则模板
+    rules_template = read_extract_rules_template(wb)
+    # 解析一次获取字段列表（用于日志表头）
+    rules_sample = json.loads(rules_template)
+    rule_fields = list(rules_sample.keys())
     log_print(f"提取规则字段: {rule_fields}")
+    
+    # 提取模板变量
+    template_variables = extract_template_variables(rules_template)
+    if template_variables:
+        log_print(f"模板变量: {template_variables}")
     
     # 验证 sheet
     if args.sheet_name not in wb.sheetnames:
@@ -385,22 +478,31 @@ def main():
         log_print(f"URL 列在表头中未找到: {missing_cols}", level="ERROR")
         sys.exit(1)
     
+    # 验证模板变量是否在表头中
+    missing_vars = [v for v in template_variables if v not in header_map]
+    if missing_vars:
+        log_print(f"模板变量在表头中未找到: {missing_vars}", level="ERROR")
+        sys.exit(1)
+    
     # 解析行范围
     data_start_row = args.header_row + 1
     start_row, end_row = parse_rows_spec(args.rows, ws.max_row, data_start_row)
     log_print(f"处理行范围: {start_row}-{end_row} (共 {end_row - start_row + 1} 行)")
     
     # 初始化日志文件
-    log_header = get_log_header(rules)
+    log_header = get_log_header(rules_sample)
     ensure_log_header(log_path, log_header)
     
     # 加载已提取的 URL
     existing_urls = load_existing_urls(log_path)
     log_print(f"已存在的 URL 记录: {len(existing_urls)} 条")
     
-    # 构建待处理任务：(row_idx, url_column, url)
+    # 构建待处理任务：(row_idx, url_column, url, row_data)
     tasks = []
     for row_idx in range(start_row, end_row + 1):
+        # 读取该行的模板变量数据（如果有模板变量的话）
+        row_data = read_row_data(ws, row_idx, header_map, template_variables) if template_variables else {}
+        
         for url_col in url_columns:
             col_idx = header_map[url_col]
             url = ws.cell(row=row_idx, column=col_idx).value
@@ -417,7 +519,7 @@ def main():
                     log_print(f"URL 已存在，跳过: {url[:50]}...", level="DEBUG")
                 continue
             
-            tasks.append((row_idx, url_col, url))
+            tasks.append((row_idx, url_col, url, row_data))
             existing_urls.add(url)  # 避免同一批次重复处理相同 URL
     
     wb.close()
@@ -442,10 +544,16 @@ def main():
     error_count = 0
     stats_lock = Lock()
     
-    def process_task(task: Tuple[int, str, str]):
+    def process_task(task: Tuple[int, str, str, Dict[str, Any]]):
         nonlocal processed, success_count, error_count
         
-        row_idx, url_col, url = task
+        row_idx, url_col, url, row_data = task
+        
+        # 渲染提取规则（支持动态插值）
+        if template_variables:
+            rules = render_rules_template(rules_template, row_data)
+        else:
+            rules = rules_sample
         
         # 执行提取
         result, error, duration = retry_extract(
@@ -458,7 +566,7 @@ def main():
         # 写入日志（线程安全）
         with log_lock:
             write_extract_result(
-                log_writer, url, url_col, row_idx, extract_time, duration_ms,
+                log_writer, url, url_col, row_idx, rules, extract_time, duration_ms,
                 result, error, rule_fields
             )
             log_file.flush()
