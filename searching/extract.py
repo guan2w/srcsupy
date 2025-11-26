@@ -127,19 +127,33 @@ def parse_url_columns(spec: str) -> List[str]:
 
 # ==================== Excel 处理 ====================
 
-def read_extract_rules_template(wb, rules_sheet: str = "ai_extract_rules") -> str:
-    """从 ai_extract_rules sheet 的 A1 单元格读取提取规则模板（JSON 字符串）"""
-    if rules_sheet not in wb.sheetnames:
-        raise ValueError(f"未找到 ai_extract_rules sheet: {rules_sheet}")
+def read_meta_value(wb, key: str, meta_sheet: str = "meta") -> str:
+    """
+    从 meta sheet 读取指定 key 的 value
+    meta 表结构：A1="key", B1="value"，数据从第2行开始
+    """
+    if meta_sheet not in wb.sheetnames:
+        raise ValueError(f"未找到 meta sheet: {meta_sheet}")
     
-    ws = wb[rules_sheet]
-    rules_json = ws.cell(row=1, column=1).value
+    ws = wb[meta_sheet]
     
-    if not rules_json:
-        raise ValueError("ai_extract_rules sheet A1 单元格为空")
+    # 遍历查找 key
+    for row in range(2, ws.max_row + 1):
+        cell_key = ws.cell(row=row, column=1).value
+        if cell_key and str(cell_key).strip() == key:
+            cell_value = ws.cell(row=row, column=2).value
+            if not cell_value:
+                raise ValueError(f"meta 表中 key='{key}' 的 value 为空，请填写")
+            return str(cell_value).strip()
+    
+    raise ValueError(f"meta 表中未找到 key='{key}'，请添加")
+
+
+def read_extract_rules_template(wb) -> str:
+    """从 meta sheet 读取提取规则模板（key='ai_extract_rules'）"""
+    rules_str = read_meta_value(wb, "ai_extract_rules")
     
     # 验证 JSON 格式
-    rules_str = str(rules_json).strip()
     try:
         rules = json.loads(rules_str)
         if not isinstance(rules, dict):
