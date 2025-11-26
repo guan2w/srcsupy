@@ -158,35 +158,40 @@ def extract_template_variables(template: str) -> List[str]:
 
 
 def read_header_mapping(ws, header_row: int) -> Dict[str, int]:
-    """读取表头，返回列名到列索引的映射"""
+    """读取表头，返回列名到列索引的映射（0-based，适配 iter_rows）"""
     header_map = {}
-    for col in range(1, ws.max_column + 1):
-        cell_value = ws.cell(row=header_row, column=col).value
-        if cell_value:
-            header_map[str(cell_value).strip()] = col
+    # 使用 iter_rows 批量读取表头行
+    for row in ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True):
+        for col_idx, cell_value in enumerate(row):
+            if cell_value:
+                header_map[str(cell_value).strip()] = col_idx  # 0-based 索引
     return header_map
 
 
-def render_template(template: str, row_data: Dict[str, Any]) -> str:
-    """根据行数据渲染模板"""
-    result = template
-    for key, value in row_data.items():
-        placeholder = "{{" + key + "}}"
-        if placeholder in result:
-            # 处理 None 和空值
-            str_value = str(value).strip() if value is not None else ""
-            result = result.replace(placeholder, str_value)
-    return result.strip()
+# 预编译模板正则，用于快速渲染
+_TEMPLATE_PATTERN = re.compile(r'\{\{(\w+)\}\}')
 
 
-def read_row_data(ws, row_idx: int, header_map: Dict[str, int], variables: List[str]) -> Dict[str, Any]:
-    """读取指定行的数据"""
+def render_template_fast(template: str, row_data: Dict[str, Any]) -> str:
+    """根据行数据渲染模板（优化版：正则一次替换）"""
+    def replacer(match):
+        key = match.group(1)
+        value = row_data.get(key)
+        return str(value).strip() if value is not None else ""
+    return _TEMPLATE_PATTERN.sub(replacer, template).strip()
+
+
+def extract_row_data_from_tuple(
+    row_tuple: tuple,
+    header_map: Dict[str, int],
+    variables: List[str]
+) -> Dict[str, Any]:
+    """从行元组中提取变量数据（优化版：使用 0-based 索引）"""
     row_data = {}
     for var in variables:
-        if var in header_map:
-            col_idx = header_map[var]
-            cell_value = ws.cell(row=row_idx, column=col_idx).value
-            row_data[var] = cell_value
+        col_idx = header_map.get(var)
+        if col_idx is not None and col_idx < len(row_tuple):
+            row_data[var] = row_tuple[col_idx]
         else:
             row_data[var] = ""
     return row_data
@@ -445,13 +450,23 @@ def main():
     existing_queries = load_existing_queries(log_path)
     log_print(f"已存在的查询记录: {len(existing_queries)} 条")
     
+    # 批量读取所有数据行到内存（核心优化：避免逐行 cell 访问）
+    log_print("正在批量读取 Excel 数据...")
+    all_rows = list(ws.iter_rows(min_row=start_row, max_row=end_row, values_only=True))
+    log_print(f"已读取 {len(all_rows)} 行数据到内存")
+    
+    wb.close()
+    
     # 构建待处理任务
     tasks = []
-    for row_idx in range(start_row, end_row + 1):
-        row_data = read_row_data(ws, row_idx, header_map, variables)
-        query = render_template(template, row_data)
+    for idx, row_tuple in enumerate(all_rows):
+        row_idx = start_row + idx
         
-        if not query.strip():
+        # 从行元组中提取变量数据
+        row_data = extract_row_data_from_tuple(row_tuple, header_map, variables)
+        query = render_template_fast(template, row_data)
+        
+        if not query:
             if args.debug:
                 log_print(f"行 {row_idx} 渲染后为空，跳过", level="DEBUG")
             continue
@@ -465,7 +480,6 @@ def main():
     
     if not tasks:
         log_print("所有行已处理完成，无需搜索")
-        wb.close()
         return
     
     log_print(f"待处理任务数: {len(tasks)}")
@@ -528,7 +542,6 @@ def main():
     
     # 清理
     log_file.close()
-    wb.close()
     
     # 显示统计
     log_print("=" * 70)
