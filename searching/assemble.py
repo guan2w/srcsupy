@@ -24,9 +24,18 @@ import re
 import shutil
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from openpyxl import load_workbook
+
+# 兼容不同 Python 版本的 toml 库导入
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
 
 
 # ==================== 工具函数 ====================
@@ -36,6 +45,23 @@ def log_print(*args, level="INFO", **kwargs):
     import datetime as dt
     now = dt.datetime.now().strftime("%H:%M:%S")
     print(f"[{now}] [{level}]", *args, **kwargs)
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """读取配置文件"""
+    cfg = {
+        "exclude_url_pattern": None
+    }
+    if not os.path.exists(config_path) or tomllib is None:
+        return cfg
+    try:
+        with open(config_path, "rb") as f:
+            data = tomllib.load(f)
+            assemble_cfg = data.get("assemble", {})
+            cfg.update({k: v for k, v in assemble_cfg.items() if k in cfg})
+    except Exception as e:
+        log_print(f"解析 config.toml 出错：{e}", level="WARN")
+    return cfg
 
 
 def parse_rows_spec(spec: str, max_row: int, start_row: int) -> Tuple[int, int]:
@@ -217,6 +243,17 @@ def main():
     log_path = os.path.join(base_dir, f"{base_name}-search-log.csv")
     output_path = os.path.join(base_dir, f"{base_name}-assembled.xlsx")
     
+    # 加载配置文件
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(script_dir, "config.toml")
+    if not os.path.exists(config_path):
+        config_path = os.path.join(base_dir, "config.toml")
+    cfg = load_config(config_path)
+    
+    # URL 排除模式
+    exclude_pattern = cfg.get("exclude_url_pattern")
+    exclude_regex = re.compile(exclude_pattern) if exclude_pattern else None
+    
     # 解析 columns 参数
     try:
         columns_spec = parse_columns_spec(args.columns)
@@ -233,6 +270,7 @@ def main():
     log_print(f"  数据行范围: {args.rows}")
     log_print(f"  Top-N: {args.top_n}")
     log_print(f"  输出列: {columns_spec}")
+    log_print(f"  URL排除模式: {exclude_pattern or '无'}")
     log_print(f"  搜索日志: {log_path}")
     log_print(f"  输出文件: {output_path}")
     log_print("=" * 70)
@@ -287,10 +325,10 @@ def main():
     # 计算新列的起始位置
     original_max_col = ws_write.max_column
     
-    # 生成新列标题（顺序 B：来源链接1, 来源链接2, 域名1, 域名2）
+    # 生成新列标题（顺序 A：来源链接1, 域名1, 来源链接2, 域名2）
     new_headers = []
-    for output_name, _ in columns_spec:
-        for i in range(1, args.top_n + 1):
+    for i in range(1, args.top_n + 1):
+        for output_name, _ in columns_spec:
             new_headers.append(f"{output_name}{i}")
     
     # 写入新列标题
@@ -325,6 +363,10 @@ def main():
         # 查找搜索结果
         results = search_data.get(query, [])
         
+        # 根据 exclude_url_pattern 过滤结果
+        if exclude_regex and results:
+            results = [r for r in results if not exclude_regex.search(r.get("url", ""))]
+        
         if not results:
             if args.debug:
                 log_print(f"行 {row_idx} 未找到搜索结果: {query[:40]}...", level="DEBUG")
@@ -333,11 +375,11 @@ def main():
         
         matched_count += 1
         
-        # 填充新列数据
+        # 填充新列数据（顺序 A：按结果分组）
         col_offset = original_max_col + 1
-        for field_idx, (_, field_name) in enumerate(columns_spec):
-            for result_idx in range(args.top_n):
-                col_idx = col_offset + field_idx * args.top_n + result_idx
+        for result_idx in range(args.top_n):
+            for field_idx, (_, field_name) in enumerate(columns_spec):
+                col_idx = col_offset + result_idx * len(columns_spec) + field_idx
                 
                 if result_idx < len(results):
                     value = results[result_idx].get(field_name, "")
