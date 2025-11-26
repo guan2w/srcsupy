@@ -300,21 +300,45 @@ def extract_from_url(
                 except:
                     return text
         
-        # 检查响应
-        if response.status_code != 200:
-            readable_text = decode_response_text(response_text[:500])
-            return None, f"HTTP {response.status_code}: {readable_text}", duration
-        
         # 解析 JSON 响应
-        try:
-            # 直接用 json.loads 解析（自动处理 Unicode 转义）
-            data = json.loads(response_text)
-            # 额外处理可能残留的 Unicode 转义
-            data = decode_unicode_keys(data)
-            return data, None, duration
-        except json.JSONDecodeError as e:
+        def try_parse_json(text: str) -> Optional[Dict]:
+            """尝试解析 JSON，失败返回 None"""
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    return decode_unicode_keys(data)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            return None
+        
+        def has_valid_values(data: Optional[Dict]) -> bool:
+            """检查字典是否有非空值"""
+            if not data or not isinstance(data, dict):
+                return False
+            # 至少有一个非空值
+            return any(v is not None and v != "" and v != [] and v != {} for v in data.values())
+        
+        # 正常响应
+        if response.status_code == 200:
+            data = try_parse_json(response_text)
+            if data is not None:
+                return data, None, duration
             readable_text = decode_response_text(response_text[:500])
-            return None, f"JSON 解析失败: {e}. 响应内容: {readable_text}", duration
+            return None, f"JSON 解析失败. 响应内容: {readable_text}", duration
+        
+        # HTTP 500 特殊处理：如果返回了有效 JSON 数据，视为成功
+        if response.status_code == 500:
+            data = try_parse_json(response_text)
+            if has_valid_values(data):
+                log_print(f"HTTP 500 但包含有效数据，视为成功: {list(data.keys())}", level="WARN")
+                return data, None, duration
+            # 无有效数据，返回错误
+            readable_text = decode_response_text(response_text[:500])
+            return None, f"HTTP 500: {readable_text}", duration
+        
+        # 其他错误状态码
+        readable_text = decode_response_text(response_text[:500])
+        return None, f"HTTP {response.status_code}: {readable_text}", duration
             
     except Exception as e:
         return None, f"请求异常: {e}", time.monotonic() - start
