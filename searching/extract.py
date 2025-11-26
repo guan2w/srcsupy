@@ -184,7 +184,7 @@ def render_rules_template(template: str, row_data: Dict[str, Any]) -> Dict[str, 
 
 
 def read_row_data(ws, row_idx: int, header_map: Dict[str, int], variables: List[str]) -> Dict[str, Any]:
-    """读取指定行的数据（仅读取模板需要的变量）"""
+    """读取指定行的数据（仅读取模板需要的变量）- 已废弃，保留兼容"""
     row_data = {}
     for var in variables:
         if var in header_map:
@@ -196,13 +196,30 @@ def read_row_data(ws, row_idx: int, header_map: Dict[str, int], variables: List[
     return row_data
 
 
+def extract_row_data_from_tuple(
+    row_tuple: tuple,
+    header_map: Dict[str, int],
+    variables: List[str]
+) -> Dict[str, Any]:
+    """从行元组中提取变量数据（优化版：使用 0-based 索引）"""
+    row_data = {}
+    for var in variables:
+        col_idx = header_map.get(var)
+        if col_idx is not None and col_idx < len(row_tuple):
+            row_data[var] = row_tuple[col_idx]
+        else:
+            row_data[var] = ""
+    return row_data
+
+
 def read_header_mapping(ws, header_row: int) -> Dict[str, int]:
-    """读取表头，返回列名到列索引的映射"""
+    """读取表头，返回列名到列索引的映射（0-based，适配 iter_rows）"""
     header_map = {}
-    for col in range(1, ws.max_column + 1):
-        cell_value = ws.cell(row=header_row, column=col).value
-        if cell_value:
-            header_map[str(cell_value).strip()] = col
+    # 使用 iter_rows 批量读取表头行
+    for row in ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True):
+        for col_idx, cell_value in enumerate(row):
+            if cell_value:
+                header_map[str(cell_value).strip()] = col_idx  # 0-based 索引
     return header_map
 
 
@@ -528,15 +545,27 @@ def main():
     existing_urls = load_existing_urls(log_path)
     log_print(f"已存在的 URL 记录: {len(existing_urls)} 条")
     
+    # 获取 URL 列的索引（0-based）
+    url_col_indices = [(col, header_map[col]) for col in url_columns]
+    
+    # 批量读取所有数据行到内存（核心优化：避免逐行 cell 访问）
+    log_print("正在批量读取 Excel 数据...")
+    all_rows = list(ws.iter_rows(min_row=start_row, max_row=end_row, values_only=True))
+    log_print(f"已读取 {len(all_rows)} 行数据到内存")
+    
+    wb.close()
+    
     # 构建待处理任务：(row_idx, url_column, url, row_data)
     tasks = []
-    for row_idx in range(start_row, end_row + 1):
-        # 读取该行的模板变量数据（如果有模板变量的话）
-        row_data = read_row_data(ws, row_idx, header_map, template_variables) if template_variables else {}
+    for idx, row_tuple in enumerate(all_rows):
+        row_idx = start_row + idx
         
-        for url_col in url_columns:
-            col_idx = header_map[url_col]
-            url = ws.cell(row=row_idx, column=col_idx).value
+        # 从行元组中提取模板变量数据（如果有模板变量的话）
+        row_data = extract_row_data_from_tuple(row_tuple, header_map, template_variables) if template_variables else {}
+        
+        for url_col, col_idx in url_col_indices:
+            # 从元组中获取 URL（0-based 索引）
+            url = row_tuple[col_idx] if col_idx < len(row_tuple) else None
             
             if not url or not str(url).strip():
                 if args.debug:
@@ -552,8 +581,6 @@ def main():
             
             tasks.append((row_idx, url_col, url, row_data))
             existing_urls.add(url)  # 避免同一批次重复处理相同 URL
-    
-    wb.close()
     
     if not tasks:
         log_print("所有 URL 已处理完成，无需提取")
