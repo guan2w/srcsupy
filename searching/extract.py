@@ -266,13 +266,29 @@ def extract_from_url(
         )
         duration = time.monotonic() - start
         
-        # 检查响应
-        if response.status_code != 200:
-            return None, f"HTTP {response.status_code}: {response.text[:500]}", duration
-        
-        # 解析 JSON 响应
+        # 获取响应文本
         response_text = response.text if hasattr(response, 'text') else response.content.decode('utf-8')
         
+        # 解码 Unicode 转义以便于阅读
+        def decode_response_text(text: str) -> str:
+            """解码响应文本中的 Unicode 转义，便于日志阅读"""
+            try:
+                # 尝试解析为 JSON 后重新序列化（自动解码 Unicode）
+                data = json.loads(text)
+                return json.dumps(data, ensure_ascii=False)
+            except:
+                # 如果不是 JSON，尝试直接解码
+                try:
+                    return text.encode('utf-8').decode('unicode_escape')
+                except:
+                    return text
+        
+        # 检查响应
+        if response.status_code != 200:
+            readable_text = decode_response_text(response_text[:500])
+            return None, f"HTTP {response.status_code}: {readable_text}", duration
+        
+        # 解析 JSON 响应
         try:
             # 直接用 json.loads 解析（自动处理 Unicode 转义）
             data = json.loads(response_text)
@@ -280,7 +296,8 @@ def extract_from_url(
             data = decode_unicode_keys(data)
             return data, None, duration
         except json.JSONDecodeError as e:
-            return None, f"JSON 解析失败: {e}. 响应内容: {response_text[:500]}", duration
+            readable_text = decode_response_text(response_text[:500])
+            return None, f"JSON 解析失败: {e}. 响应内容: {readable_text}", duration
             
     except Exception as e:
         return None, f"请求异常: {e}", time.monotonic() - start
