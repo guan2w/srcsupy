@@ -1,11 +1,11 @@
-# Searching 搜索工具
+# Searching 搜索与提取工具
 
-基于 ScrapingBee Google Search API 的批量搜索工具，支持 Excel 模板驱动、断点续跑、并发执行。
+基于 ScrapingBee API 的批量搜索与数据提取工具，支持 Excel 驱动、断点续跑、并发执行。
 
 ## 依赖
 
 ```bash
-pip install openpyxl requests
+pip install openpyxl requests scrapingbee
 ```
 
 ## 配置
@@ -145,7 +145,7 @@ python assemble.py \
 → 来源链接1, 域名1, 来源链接2, 域名2, 来源链接3, 域名3
 ```
 
-## 工作流程
+## 搜索工作流程
 
 ```
 1. 准备输入 Excel（输入表 + template 表）
@@ -154,4 +154,121 @@ python assemble.py \
 ```
 
 支持中断后重跑，search.py 会自动跳过已完成的查询。
+
+---
+
+## extract.py
+
+调用 ScrapingBee AI Extract 从 URL 提取结构化数据，结果写入 `{input}-extract-log.csv`。
+
+### 输入文件格式
+
+Excel 文件需包含 `ai_extract_rules` Sheet：
+- A1 单元格存储提取规则（JSON 格式）
+
+**规则示例**：
+```json
+{
+    "学者姓名": "页面中介绍的那个学者/教师的姓名",
+    "所在学校": "学者所在的学校",
+    "任职部门": "学者所在的学校的二级部门"
+}
+```
+
+### 参数
+
+| 参数 | 必需 | 默认值 | 说明 |
+|------|:----:|--------|------|
+| `--input-file` | ✓ | | 输入 Excel 文件 |
+| `--sheet-name` | ✓ | | 输入数据 Sheet 名称 |
+| `--header-row` | | 1 | 表头行号 |
+| `--rows` | ✓ | | 数据行范围 |
+| `--url-columns` | ✓ | | URL 列名，多个用逗号分隔 |
+| `--concurrency` | | 配置文件值 | 并发数 |
+| `--debug` | | | 调试模式 |
+
+### 示例
+
+```bash
+python extract.py \
+    --input-file=data.xlsx \
+    --sheet-name=数据表 \
+    --header-row=2 \
+    --rows=3+ \
+    --url-columns=来源链接1,来源链接2 \
+    --concurrency=5
+```
+
+### 输出日志格式
+
+| 字段 | 说明 |
+|------|------|
+| url | 提取的 URL |
+| url_column | URL 所在列名 |
+| row_number | 输入行号（参考） |
+| extract_time | 提取时间 |
+| duration_ms | 提取耗时(ms) |
+| SUCCESS | 是否成功 |
+| ERROR | 错误信息 |
+| *规则字段* | 提取结果（动态列） |
+
+**断点续跑**：通过 URL 判断是否已提取，同一 URL 只提取一次。
+
+## extract-assemble.py
+
+整合输入 Excel 与提取日志，在每个 URL 列右侧插入提取结果列，输出 `{input}-extracted.xlsx`。
+
+### 参数
+
+| 参数 | 必需 | 默认值 | 说明 |
+|------|:----:|--------|------|
+| `--input-file` | ✓ | | 输入 Excel 文件 |
+| `--sheet-name` | ✓ | | 输入数据 Sheet 名称 |
+| `--header-row` | | 1 | 表头行号 |
+| `--rows` | ✓ | | 数据行范围 |
+| `--url-columns` | ✓ | | URL 列名，多个用逗号分隔 |
+| `--insert-mode` | | after_url | 列插入模式 |
+| `--debug` | | | 调试模式 |
+
+### 插入模式
+
+| 模式 | 说明 |
+|------|------|
+| `after_url` | 在每个 URL 列右侧插入结果列（默认） |
+| `append` | 在所有列末尾追加结果列 |
+
+### 示例
+
+```bash
+python extract-assemble.py \
+    --input-file=data.xlsx \
+    --sheet-name=数据表 \
+    --header-row=2 \
+    --rows=3+ \
+    --url-columns=来源链接1,来源链接2
+```
+
+### 输出列结构
+
+假设 `--url-columns=来源链接1,来源链接2`，提取规则有 `学者姓名`, `所在学校` 字段：
+
+**after_url 模式**：
+```
+... | 来源链接1 | 来源链接1-学者姓名 | 来源链接1-所在学校 | ... | 来源链接2 | 来源链接2-学者姓名 | 来源链接2-所在学校 | ...
+```
+
+**append 模式**：
+```
+原始列... | 来源链接1-学者姓名 | 来源链接1-所在学校 | 来源链接2-学者姓名 | 来源链接2-所在学校
+```
+
+## 提取工作流程
+
+```
+1. 准备输入 Excel（数据表 + ai_extract_rules 表）
+2. 执行 extract.py → 生成 extract-log.csv
+3. 执行 extract-assemble.py → 生成 extracted.xlsx
+```
+
+支持中断后重跑，extract.py 会自动跳过已提取的 URL。
 
