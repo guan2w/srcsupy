@@ -113,18 +113,31 @@ def parse_columns_spec(spec: str) -> List[Tuple[str, str]]:
 
 # ==================== Excel 处理 ====================
 
-def read_template(wb, template_sheet: str = "template") -> str:
-    """从 template sheet 读取搜索模板"""
-    if template_sheet not in wb.sheetnames:
-        raise ValueError(f"未找到 template sheet: {template_sheet}")
+def read_meta_value(wb, key: str, meta_sheet: str = "meta") -> str:
+    """
+    从 meta sheet 读取指定 key 的 value
+    meta 表结构：A1="key", B1="value"，数据从第2行开始
+    """
+    if meta_sheet not in wb.sheetnames:
+        raise ValueError(f"未找到 meta sheet: {meta_sheet}")
     
-    ws = wb[template_sheet]
-    template = ws.cell(row=2, column=1).value
+    ws = wb[meta_sheet]
     
-    if not template:
-        raise ValueError("template sheet A2 单元格为空")
+    # 遍历查找 key
+    for row in range(2, ws.max_row + 1):
+        cell_key = ws.cell(row=row, column=1).value
+        if cell_key and str(cell_key).strip() == key:
+            cell_value = ws.cell(row=row, column=2).value
+            if not cell_value:
+                raise ValueError(f"meta 表中 key='{key}' 的 value 为空，请填写")
+            return str(cell_value).strip()
     
-    return str(template).strip()
+    raise ValueError(f"meta 表中未找到 key='{key}'，请添加")
+
+
+def read_search_template(wb) -> str:
+    """从 meta sheet 读取搜索模板（key='search'）"""
+    return read_meta_value(wb, "search")
 
 
 def extract_template_variables(template: str) -> List[str]:
@@ -290,7 +303,7 @@ def main():
     wb_read = load_workbook(input_path, read_only=True, data_only=True)
     
     # 读取模板
-    template = read_template(wb_read)
+    template = read_search_template(wb_read)
     variables = extract_template_variables(template)
     log_print(f"搜索模板: {template}")
     log_print(f"模板变量: {variables}")

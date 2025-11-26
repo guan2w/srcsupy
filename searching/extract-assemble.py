@@ -84,19 +84,34 @@ def parse_url_columns(spec: str) -> List[str]:
 
 # ==================== Excel 处理 ====================
 
-def read_extract_rules(wb, rules_sheet: str = "ai_extract_rules") -> Dict[str, str]:
-    """从 ai_extract_rules sheet 读取提取规则，获取字段列表"""
-    if rules_sheet not in wb.sheetnames:
-        raise ValueError(f"未找到 ai_extract_rules sheet: {rules_sheet}")
+def read_meta_value(wb, key: str, meta_sheet: str = "meta") -> str:
+    """
+    从 meta sheet 读取指定 key 的 value
+    meta 表结构：A1="key", B1="value"，数据从第2行开始
+    """
+    if meta_sheet not in wb.sheetnames:
+        raise ValueError(f"未找到 meta sheet: {meta_sheet}")
     
-    ws = wb[rules_sheet]
-    rules_json = ws.cell(row=1, column=1).value
+    ws = wb[meta_sheet]
     
-    if not rules_json:
-        raise ValueError("ai_extract_rules sheet A1 单元格为空")
+    # 遍历查找 key
+    for row in range(2, ws.max_row + 1):
+        cell_key = ws.cell(row=row, column=1).value
+        if cell_key and str(cell_key).strip() == key:
+            cell_value = ws.cell(row=row, column=2).value
+            if not cell_value:
+                raise ValueError(f"meta 表中 key='{key}' 的 value 为空，请填写")
+            return str(cell_value).strip()
+    
+    raise ValueError(f"meta 表中未找到 key='{key}'，请添加")
+
+
+def read_extract_rules(wb) -> Dict[str, str]:
+    """从 meta sheet 读取提取规则（key='ai_extract_rules'），获取字段列表"""
+    rules_str = read_meta_value(wb, "ai_extract_rules")
     
     try:
-        rules = json.loads(str(rules_json).strip())
+        rules = json.loads(rules_str)
         if not isinstance(rules, dict):
             raise ValueError("提取规则必须是 JSON 对象")
         return rules
@@ -143,7 +158,7 @@ def load_extract_log(log_path: str) -> Dict[str, Dict[str, Any]]:
             fieldnames = reader.fieldnames or []
             
             # 获取提取结果字段（排除基础字段）
-            base_fields = {"url", "url_column", "row_number", "extract_time", "duration_ms", "SUCCESS", "ERROR"}
+            base_fields = {"url", "url_column", "row_number", "ai_extract_rules", "extract_time", "duration_ms", "SUCCESS", "ERROR"}
             result_fields = [f for f in fieldnames if f not in base_fields]
             
             for row in reader:
@@ -173,7 +188,7 @@ def get_result_fields_from_log(log_path: str) -> List[str]:
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or []
             
-            base_fields = {"url", "url_column", "row_number", "extract_time", "duration_ms", "SUCCESS", "ERROR"}
+            base_fields = {"url", "url_column", "row_number", "ai_extract_rules", "extract_time", "duration_ms", "SUCCESS", "ERROR"}
             return [f for f in fieldnames if f not in base_fields]
     except Exception:
         return []
