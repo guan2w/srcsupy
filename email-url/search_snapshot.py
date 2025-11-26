@@ -148,10 +148,12 @@ def search_google(api_key: str, keywords: str, timeout: int, proxies=None):
         response = requests.get(url, params=params, timeout=timeout, proxies=proxies)
         duration = time.monotonic() - start
         if response.status_code != 200:
-            return None, f"HTTP {response.status_code}: {response.text[:200]}", duration
+            return None, f"HTTP {response.status_code}: {response.text[:1000]}", duration
         data = response.json()
         organic = data.get("organic_results", [])
-        return organic if isinstance(organic, list) else None, "organic_results 非列表", duration
+        if isinstance(organic, list):
+            return organic, None, duration
+        return None, f"organic_results 非列表. 响应内容: {json.dumps(data, ensure_ascii=False)[:2000]}", duration
     except Exception as e:
         return None, f"请求异常: {e}", time.monotonic() - start
 
@@ -294,7 +296,8 @@ def process_row(sheet_name: str, row_idx: int, ws, columns_spec: List[Tuple[int,
         if result and result[0] is not None:
             organic_results, search_error, dur = result[0], "", result[2]
         else:
-            organic_results, search_error, dur = [], result[1] if result else ["unknown error"], 0
+            errors = result[1] if result else ["unknown error"]
+            organic_results, search_error, dur = [], "; ".join(errors) if isinstance(errors, list) else str(errors), 0
         search_duration_ms = int(dur * 1000)
         search_cache[keywords] = {"results": organic_results, "search_error": search_error}
 
