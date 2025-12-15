@@ -20,7 +20,6 @@ import argparse
 import csv
 import json
 import os
-import re
 import shutil
 import sys
 from collections import defaultdict
@@ -42,17 +41,6 @@ CURRENT_INSERT_MODE = INSERT_MODE_AFTER_URL
 
 
 # ==================== 工具函数 ====================
-
-# Excel 非法字符正则表达式（控制字符，除了 tab \x09、换行 \x0a、回车 \x0d）
-ILLEGAL_CHARACTERS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
-
-
-def clean_illegal_characters(value: Any) -> Any:
-    """清理 Excel 不允许的非法字符"""
-    if isinstance(value, str):
-        return ILLEGAL_CHARACTERS_RE.sub('', value)
-    return value
-
 
 def log_print(*args, level="INFO", **kwargs):
     """通用日志打印函数"""
@@ -131,25 +119,13 @@ def read_extract_rules(wb) -> Dict[str, str]:
         raise ValueError(f"提取规则 JSON 解析失败: {e}")
 
 
-def read_header_mapping(ws, header_row: int, use_iter: bool = False) -> Dict[str, int]:
-    """
-    读取表头，返回列名到列索引的映射
-    use_iter=True 时使用 iter_rows（适用于 read_only 模式），返回 0-based 索引
-    use_iter=False 时使用 cell（适用于写入模式），返回 1-based 索引
-    """
+def read_header_mapping(ws, header_row: int) -> Dict[str, int]:
+    """读取表头，返回列名到列索引的映射"""
     header_map = {}
-    if use_iter:
-        # read_only 模式：使用 iter_rows 批量读取，0-based 索引
-        for row in ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True):
-            for col_idx, cell_value in enumerate(row):
-                if cell_value:
-                    header_map[str(cell_value).strip()] = col_idx  # 0-based
-    else:
-        # 写入模式：使用 cell，1-based 索引
-        for col in range(1, ws.max_column + 1):
-            cell_value = ws.cell(row=header_row, column=col).value
-            if cell_value:
-                header_map[str(cell_value).strip()] = col  # 1-based
+    for col in range(1, ws.max_column + 1):
+        cell_value = ws.cell(row=header_row, column=col).value
+        if cell_value:
+            header_map[str(cell_value).strip()] = col
     return header_map
 
 
@@ -373,11 +349,11 @@ def main():
     
     ws_read = wb_read[args.sheet_name]
     
-    # 读取表头映射（read_only 模式，使用 iter_rows，0-based 索引）
-    header_map_read = read_header_mapping(ws_read, args.header_row, use_iter=True)
+    # 读取表头映射
+    header_map = read_header_mapping(ws_read, args.header_row)
     
     # 验证 URL 列
-    missing_cols = [col for col in url_columns if col not in header_map_read]
+    missing_cols = [col for col in url_columns if col not in header_map]
     if missing_cols:
         log_print(f"URL 列在表头中未找到: {missing_cols}", level="ERROR")
         sys.exit(1)
@@ -388,26 +364,17 @@ def main():
     total_rows = end_row - start_row + 1
     log_print(f"处理行范围: {start_row}-{end_row} (共 {total_rows} 行)")
     
-    # 获取 URL 列的索引（0-based）
-    url_col_indices = [(col, header_map_read[col]) for col in url_columns]
-    
-    # 批量读取所有数据行到内存（核心优化：避免逐行 cell 访问）
-    log_print("正在批量读取 Excel 数据...")
-    all_rows = list(ws_read.iter_rows(min_row=start_row, max_row=end_row, values_only=True))
-    log_print(f"已读取 {len(all_rows)} 行数据到内存")
+    # 读取所有行的 URL 数据用于后续匹配
+    url_data = {}  # {row_idx: {url_column: url}}
+    for row_idx in range(start_row, end_row + 1):
+        url_data[row_idx] = {}
+        for url_col in url_columns:
+            col_idx = header_map[url_col]
+            url = ws_read.cell(row=row_idx, column=col_idx).value
+            if url:
+                url_data[row_idx][url_col] = str(url).strip()
     
     wb_read.close()
-    
-    # 从批量读取的数据中提取 URL
-    url_data = {}  # {row_idx: {url_column: url}}
-    for idx, row_tuple in enumerate(all_rows):
-        row_idx = start_row + idx
-        url_data[row_idx] = {}
-        for url_col, col_idx in url_col_indices:
-            if col_idx < len(row_tuple):
-                url = row_tuple[col_idx]
-                if url:
-                    url_data[row_idx][url_col] = str(url).strip()
     
     # 复制输入文件到输出文件
     log_print("正在复制输入文件...")
@@ -474,8 +441,7 @@ def main():
                     if col_name in header_map:
                         col_idx = header_map[col_name]
                         value = result.get(field, "")
-                        # 清理非法字符后写入
-                        ws_write.cell(row=row_idx, column=col_idx, value=clean_illegal_characters(value))
+                        ws_write.cell(row=row_idx, column=col_idx, value=value)
             
             # 进度显示
             if (row_idx - start_row + 1) % 100 == 0:
@@ -513,8 +479,7 @@ def main():
                     if col_name in header_map:
                         col_idx = header_map[col_name]
                         value = result.get(field, "")
-                        # 清理非法字符后写入
-                        ws_write.cell(row=row_idx, column=col_idx, value=clean_illegal_characters(value))
+                        ws_write.cell(row=row_idx, column=col_idx, value=value)
             
             if (row_idx - start_row + 1) % 100 == 0:
                 progress = (row_idx - start_row + 1) / total_rows * 100

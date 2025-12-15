@@ -117,24 +117,25 @@ def sha1_hex(text: str) -> str: return hashlib.sha1(text.encode("utf-8")).hexdig
 
 # ==================== ScrapingBee API 调用 ====================
 
-def retry_operation(operation_func, *args, retry_times=1, task_prefix="", **kwargs):
+def retry_operation(operation_func, *args, retry_times=1, task_prefix="", operation_name="", **kwargs):
     """通用重试函数"""
     errors = []
     attempts = 1 + max(retry_times, 0)
+    op_name = operation_name or operation_func.__name__  # 使用显式名称或函数名，避免泄露敏感参数
     for attempt in range(1, attempts + 1):
         try:
             result = operation_func(*args, **kwargs)
             if isinstance(result, tuple) and len(result) >= 2 and result[1] is None:
-                log_print(f"[成功] {args[0] if args else '操作'} | 尝试 {attempt}/{attempts}", task_prefix=task_prefix)
+                log_print(f"[成功] {op_name} | 尝试 {attempt}/{attempts}", task_prefix=task_prefix)
                 return result
             elif isinstance(result, tuple) and len(result) >= 2:
                 error = result[1]
             else:
                 error = result
-            log_print(f"[失败] {args[0] if args else '操作'} | 尝试 {attempt}/{attempts} | 错误: {error}", task_prefix=task_prefix)
+            log_print(f"[失败] {op_name} | 尝试 {attempt}/{attempts} | 错误: {error}", task_prefix=task_prefix)
             errors.append(f"attempt {attempt}: {error}")
         except Exception as e:
-            log_print(f"[异常] {args[0] if args else '操作'} | 尝试 {attempt}/{attempts} | 错误: {e}", task_prefix=task_prefix)
+            log_print(f"[异常] {op_name} | 尝试 {attempt}/{attempts} | 错误: {e}", task_prefix=task_prefix)
             errors.append(f"attempt {attempt}: {e}")
         time.sleep(min(1.0 * attempt, 5.0))
     return None, errors
@@ -292,7 +293,7 @@ def process_row(sheet_name: str, row_idx: int, ws, columns_spec: List[Tuple[int,
         organic_results, search_error = search_cache[keywords]["results"], search_cache[keywords]["search_error"]
         search_duration_ms = 0
     else:
-        result = retry_operation(search_google, api_key, keywords, timeout, retry_times=retry_times, proxies=proxies, task_prefix=task_prefix)
+        result = retry_operation(search_google, api_key, keywords, timeout, retry_times=retry_times, proxies=proxies, task_prefix=task_prefix, operation_name=f"搜索: {keywords[:50]}")
         if result and result[0] is not None:
             organic_results, search_error, dur = result[0], "", result[2]
         else:
@@ -350,7 +351,7 @@ def process_row(sheet_name: str, row_idx: int, ws, columns_spec: List[Tuple[int,
         # 根据下载方式选择处理函数
         if is_direct:
             # 直接下载文件
-            result = retry_operation(download_direct, url, full_path, timeout, retry_times=retry_times, proxies=proxies, task_prefix=task_prefix)
+            result = retry_operation(download_direct, url, full_path, timeout, retry_times=retry_times, proxies=proxies, task_prefix=task_prefix, operation_name=f"下载: {url}")
             if result and result[0] is not None:
                 file_size, _, _ = result
                 snapshot_error = ""
@@ -358,7 +359,7 @@ def process_row(sheet_name: str, row_idx: int, ws, columns_spec: List[Tuple[int,
                 file_size, snapshot_error = 0, "; ".join(result[1]) if result else "download failed"
         else:
             # 使用 ScrapingBee 截图
-            result = retry_operation(take_screenshot, client, url, full_path, timeout, retry_times=retry_times, task_prefix=task_prefix)
+            result = retry_operation(take_screenshot, client, url, full_path, timeout, retry_times=retry_times, task_prefix=task_prefix, operation_name=f"截图: {url}")
             if result and result[0] is not None:
                 file_size, _, _ = result
                 snapshot_error = ""
