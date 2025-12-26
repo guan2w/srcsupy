@@ -114,7 +114,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
     # 默认配置
     cfg = {
         "timeout_seconds": 120,
-        "concurrency": 200,
+        "concurrency": 20,
         "retry_times": 3,
         "proxy": None,
         "dom_html": True,
@@ -648,7 +648,7 @@ def main():
     client = ScrapingBeeClient(api_key=api_key)
     
     # 并发配置
-    concurrency = min(cfg["concurrency"], 500)
+    concurrency = min(cfg["concurrency"], 50)
     log_print(f"并发线程数: {concurrency}")
     log_print(f"截图: {'启用' if cfg['screenshot'] else '禁用'}")
     log_print(f"HTML: {'启用' if cfg['dom_html'] else '禁用'}")
